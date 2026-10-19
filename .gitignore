@@ -1,0 +1,13 @@
+# Lean / Lake build output and Mathlib checkout
+.lake/
+# PutnamBench checkout (fetched by scripts/setup.sh)
+benchmarks/
+# scratch files, caches, Mathlib name index
+.work/
+# campaign outputs
+runs/
+# Python
+__pycache__/
+*.pyc
+# local secrets
+.env

@@ -1,0 +1,18 @@
+{
+  "stall_rounds": 2,
+  "race_top": false,
+  "parallel_sketches": 1,
+  "quick_repairs": 4,
+  "repair_samples": 2,
+  "think_max_tokens": 14000,
+  "repair_max_tokens": 6000,
+  "search": true,
+  "two_stage": false,
+  "two_stage_max_depth": 1,
+  "plan_max_tokens": 14000,
+  "formalize_max_tokens": 10000,
+  "fair_share_calls": 3,
+  "depth_weight": 2,
+  "resume_previous": true,
+  "lemma_cache": true
+}
