@@ -133,10 +133,11 @@ thinking 的开关通过 vLLM 的 `chat_template_kwargs.enable_thinking` 控制�
 git clone <本仓库> lean_prover && cd lean_prover
 ./scripts/setup.sh          # elan + Lean、Mathlib 缓存、PutnamBench、Mathlib 名字索引（约 30 分钟）
 
-export LEAN_PROVER_BASE_URL=http://localhost:8000/v1   # OpenAI 兼容接口
-export LEAN_PROVER_MODEL=<服务端的模型名>
-export LEAN_PROVER_API_KEY=...                          # 可选
+cp .env.example .env       # 然后填写 LEAN_PROVER_BASE_URL、LEAN_PROVER_MODEL，以及（可选的）LEAN_PROVER_API_KEY
 ```
+
+所有设置都从项目根目录的 `.env` 读取，这个文件已被 git 忽略；模板见 [`.env.example`](.env.example)。
+在 shell 中已经设置的变量优先；也可以用 `LEAN_PROVER_ENV_FILE=/path/to/file` 指定其他文件。
 
 ## 使用
 
@@ -172,10 +173,13 @@ python -m lean_prover.selftest
 | `fair_share_calls` | 3 | 一道题每用掉 N 次模型调用，优先级降 1 |
 | `resume_previous` / `lemma_cache` | true / true | 复用之前几轮的尝试和引理 |
 
-环境变量：
+环境变量（写在 `.env` 里，或在 shell 中设置）：
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
+| `LEAN_PROVER_BASE_URL` | `http://localhost:8000/v1` | OpenAI 兼容接口地址 |
+| `LEAN_PROVER_MODEL` | （必填） | 服务端的模型名 |
+| `LEAN_PROVER_API_KEY` | （空） | 非空时作为 `Authorization: Bearer ...` 发送 |
 | `LEAN_PROVER_LLM_JOBS` | 6 | 并发 thinking 请求数 |
 | `LEAN_PROVER_QUICK_JOBS` | 2 | 并发非 thinking 请求数 |
 | `LEAN_PROVER_COMPILE_JOBS` | 10 | 并发 Lean 编译数 |
@@ -203,8 +207,10 @@ lean_prover/
   metrics.py     单轮统计
   selftest.py    离线端到端测试
   benchmarks.py  题集
+  dotenv.py      `.env` 加载器
 config/default.json   搜索设置
 scripts/              安装脚本与 Mathlib 名字索引生成器
+.env.example          模型接口、API key、并发与路径的配置模板
 results/proofs/       25 份已验证的证明
 ```
 

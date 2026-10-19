@@ -135,10 +135,12 @@ Other servers may ignore this field.
 git clone <this repo> lean_prover && cd lean_prover
 ./scripts/setup.sh          # elan + Lean, Mathlib cache, PutnamBench, Mathlib name index (~30 min)
 
-export LEAN_PROVER_BASE_URL=http://localhost:8000/v1   # OpenAI-compatible endpoint
-export LEAN_PROVER_MODEL=<served model name>
-export LEAN_PROVER_API_KEY=...                          # optional
+cp .env.example .env       # then set LEAN_PROVER_BASE_URL, LEAN_PROVER_MODEL and (optionally) LEAN_PROVER_API_KEY
 ```
+
+All settings are read from `.env` at the project root, which is git-ignored; see
+[`.env.example`](.env.example). Variables already set in the shell take precedence, and another file can be
+used with `LEAN_PROVER_ENV_FILE=/path/to/file`.
 
 ## Usage
 
@@ -174,10 +176,13 @@ be edited while a campaign runs. The main knobs:
 | `fair_share_calls` | 3 | priority drops by 1 for every N model calls a problem has used |
 | `resume_previous` / `lemma_cache` | true / true | reuse attempts and lemmas from earlier runs |
 
-Environment variables:
+Environment variables (set them in `.env` or in the shell):
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `LEAN_PROVER_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint |
+| `LEAN_PROVER_MODEL` | (required) | model name served at the endpoint |
+| `LEAN_PROVER_API_KEY` | (empty) | sent as `Authorization: Bearer ...` when set |
 | `LEAN_PROVER_LLM_JOBS` | 6 | concurrent thinking requests |
 | `LEAN_PROVER_QUICK_JOBS` | 2 | concurrent non-thinking requests |
 | `LEAN_PROVER_COMPILE_JOBS` | 10 | concurrent Lean compilations |
@@ -205,8 +210,10 @@ lean_prover/
   metrics.py     run statistics
   selftest.py    offline end-to-end test
   benchmarks.py  problem sets
+  dotenv.py      `.env` loader
 config/default.json   search settings
 scripts/              setup and the Mathlib name-index generator
+.env.example          template for model endpoint, API key, concurrency and paths
 results/proofs/       the 25 verified proofs
 ```
 

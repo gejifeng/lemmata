@@ -25,6 +25,11 @@ if [ ! -s .work/mathlib_names.tsv ]; then
   lake env lean scripts/dump_mathlib_names.lean
 fi
 
+if [ ! -f .env ]; then
+  cp .env.example .env
+  echo "Created .env from .env.example: set LEAN_PROVER_BASE_URL and LEAN_PROVER_MODEL in it."
+fi
+
 echo "Checking the environment..."
 printf 'import Mathlib\nexample : (2 : ℕ) + 2 = 4 := by norm_num\n' > .work/smoke.lean
 lake env lean .work/smoke.lean && echo "OK: Lean + Mathlib work."
