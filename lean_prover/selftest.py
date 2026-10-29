@@ -9,7 +9,8 @@ import time
 
 from . import agent, decompose, llm, search
 from .llm import LLMResponse
-from .problem import Problem
+from .formalize import formalize
+from .problem import Problem, check_statement, parse_lean_problem
 
 from .paths import RUNS_DIR
 
@@ -138,6 +139,31 @@ theorem st3 (n : ℕ) (h : 3 ≤ n) : n ^ 2 ≥ 2 * n + 1 := by
         ("Prove the following theorem", gapped),
         ("Repair these specific errors", gapped),
     ], True, rounds=2))
+
+    # 5. a user's Lean file with a definition, parsed and checked
+    src = ("import Mathlib\n\ndef my_sq (n : ℕ) : ℕ := n * n\n\n/-- Squares of even numbers are even. -/\n"
+           "theorem st5 (n : ℕ) (h : Even n) : Even (my_sq n) := by\n  sorry\n")
+    p5 = parse_lean_problem(src)
+    ok5 = p5.name == "st5" and "def my_sq" in p5.context and check_statement(p5)[0]
+    try:
+        parse_lean_problem(src.replace("def my_sq", "axiom ax : False\ndef my_sq"))
+        ok5 = False
+    except ValueError:
+        pass
+    print(f"[{'PASS' if ok5 else 'FAIL'}] lean_file_problem")
+    results.append(ok5)
+
+    # 6. natural language -> Lean: the first statement does not compile, the retry does
+    stmt = "theorem st6 (n : ℤ) : 6 ∣ n ^ 3 - n := by\n  sorry"
+    Script([
+        ("Lean rejected this statement", "```lean\nimport Mathlib\n\n" + stmt + "\n```\nNOTES: none"),
+        ("Explain precisely what this theorem claims", "For every integer n, 6 divides n^3 - n."),
+        ("Translate the following", "```lean\nimport Mathlib\n\n" + stmt.replace("ℤ)", "ℤ") + "\n```\nNOTES: none"),
+    ]).install()
+    r6 = formalize("Prove that n^3 - n is divisible by 6 for every integer n.")
+    ok6 = r6["ok"] and r6["attempts"] == 2 and r6["name"] == "st6" and "6 divides" in r6["meaning"]
+    print(f"[{'PASS' if ok6 else 'FAIL'}] formalize_retry: attempts={r6['attempts']} ok={r6['ok']}")
+    results.append(ok6)
 
     print(f"\n{sum(results)}/{len(results)} self-tests passed")
 

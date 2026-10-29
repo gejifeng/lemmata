@@ -150,7 +150,7 @@ def runtime_config() -> dict:
     """Tunable knobs (see config/default.json), re-read on every use so a running campaign can be adjusted."""
     cfg = dict(DEFAULT_CONFIG)
     try:
-        cfg.update(json.loads(CONFIG_FILE.read_text()))
+        cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
     return cfg

@@ -52,6 +52,74 @@ def parse_problem(name: str, text: str) -> Problem:
     return Problem(name, header, sol_defs, docstring, stmt)
 
 
+TARGET = re.compile(r"^theorem\s+([^\s(:{\[]+)(.*?):=\s*(?:by\s*)?\n?\s*sorry\s*\Z", re.S | re.M)
+UNSUPPORTED = re.compile(r"(?m)^\s*(namespace|section|variable|universe|end)\b")
+
+
+def parse_lean_problem(text: str, informal: str = "") -> Problem:
+    """A problem from a user's Lean file: `import`s, optional definitions, and a final
+    `theorem name ... := by sorry` (the goal). Raises ValueError with a readable reason otherwise.
+    `informal` (the natural-language statement) becomes the theorem's docstring if it has none."""
+    text = text.replace("\r\n", "\n").strip() + "\n"
+    ms = list(re.finditer(r"(?m)^theorem\s", text))
+    if not ms:
+        raise ValueError("no `theorem` found; the file must end with `theorem name ... := by sorry`")
+    last = ms[-1].start()
+    m = TARGET.match(text[last:].rstrip())
+    if not m:
+        raise ValueError("the last declaration must be the goal, written `theorem name ... := by sorry`")
+    name = m.group(1)
+    before = text[:last]
+    if UNSUPPORTED.search(re.sub(r"/-.*?-/|--[^\n]*", "", before, flags=re.S)):
+        raise ValueError("`namespace`/`section`/`variable`/`universe` are not supported; state the theorem at top level")
+    sol_defs = [(mm.group(2), mm.group(1)) for mm in
+                re.finditer(r"^((?:noncomputable )?abbrev (\S+)[^\n]*:=\s*sorry)\s*$", before, re.M)]
+    rest = before
+    for _, line in sol_defs:
+        rest = rest.replace(line, "")
+    doc_m = re.search(r"/--(?:(?!-/).)*-/\s*\Z", rest, re.S)
+    docstring = doc_m.group(0).strip() if doc_m else ""
+    if doc_m:
+        rest = rest[: doc_m.start()]
+    if not docstring and informal.strip():
+        docstring = "/--\n" + informal.strip().replace("-/", "- /") + "\n-/"
+    header = "\n".join(l for l in rest.splitlines() if l.startswith("import"))
+    if "import" not in header:
+        header = "import Mathlib"
+    context = "\n".join(l for l in rest.splitlines() if not l.startswith("import")).strip()
+    ctx_code = re.sub(r"/-.*?-/|--[^\n]*", "", context, flags=re.S)
+    bad = FORBIDDEN.search(ctx_code)
+    if bad:
+        raise ValueError(f"`{bad.group(0)}` is not allowed in the definitions before the theorem")
+    if re.search(r"\bsorry\b", re.sub(r"/-.*?-/|--[^\n]*", "", m.group(2), flags=re.S)):
+        raise ValueError("`sorry` may only appear as the proof of the final theorem")
+    stmt = "theorem " + name + m.group(2).rstrip() + " :="
+    return Problem(name, header, sol_defs, docstring, stmt, context=context)
+
+
+def check_statement(problem: Problem) -> tuple[bool, str]:
+    """Compile the problem with `sorry` as the proof. Returns (well-formed, Lean's errors)."""
+    code = problem.header + "\n\n" + problem.display() + "\n"
+    res = compile_lean(code)
+    if res.ok:
+        return True, ""
+    lines = code.split("\n")
+    out = []
+    for e in res.errors[:6]:
+        src = lines[e.line - 1].strip() if 0 < e.line <= len(lines) else ""
+        out.append(f"line {e.line}: `{src}`\n{e.text}")
+    return False, "\n\n".join(out) or "Lean reported an error"
+
+
+def load_problem(spec: str) -> Problem:
+    """A PutnamBench name (putnam_1977_a5) or the path of a Lean file."""
+    from pathlib import Path
+    p = Path(spec)
+    if spec.endswith(".lean") or p.is_file():
+        return parse_lean_problem(p.read_text(encoding="utf-8"))
+    return load_putnam(spec)
+
+
 @dataclass
 class Candidate:
     helpers: str  # top-level declarations before the theorem

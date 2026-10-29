@@ -1,11 +1,15 @@
 [project]
 name = "lean_prover"
-version = "0.1.0"
-description = "A Lean-arbitrated LLM agent for competition mathematics (Lean 4 + Mathlib, PutnamBench)"
+version = "0.2.0"
+description = "A Lean-arbitrated LLM agent for mathematics: natural language -> Lean statement -> Lean-checked proof"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
+
+[project.scripts]
+lean-prover = "lean_prover.campaign:main"
+lean-prover-webui = "lean_prover.webui:main"
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -13,3 +17,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["lean_prover"]
+
+[tool.setuptools.package-data]
+lean_prover = ["web/*.html"]

@@ -6,20 +6,121 @@ import os
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-BASE_URL = os.environ.get("LEAN_PROVER_BASE_URL", "http://localhost:8000/v1")
-MODEL = os.environ.get("LEAN_PROVER_MODEL", "")
-API_KEY = os.environ.get("LEAN_PROVER_API_KEY", "")
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]  # offered in the web UI
+# Request dialects: which fields switch thinking on/off and which sampling options the server accepts.
+#   deepseek: `thinking: {type: enabled|disabled}` (+ `reasoning_effort`), as in the DeepSeek V4 API
+#   vllm:     `chat_template_kwargs.enable_thinking` (Qwen-style templates), `n`, assistant prefill
+#   openai:   plain Chat Completions (+ `reasoning_effort` when set)
+API_STYLES = ("deepseek", "vllm", "openai")
+
+_local = threading.local()  # per-thread model override (the web UI lets each request pick a model)
 
 
-def _headers() -> dict:
-    if not MODEL:
-        raise LLMFailure("LEAN_PROVER_MODEL is not set (the model name served at LEAN_PROVER_BASE_URL)")
+class LLMFailure(Exception):
+    pass
+
+
+def settings() -> dict:
+    """Endpoint settings, read from the environment on every call so the web UI can change them at runtime."""
+    style = (os.environ.get("LEAN_PROVER_API_STYLE") or "deepseek").strip().lower()
+    if style not in API_STYLES:
+        raise LLMFailure(f"LEAN_PROVER_API_STYLE must be one of {', '.join(API_STYLES)}, not {style!r}")
+    return {
+        "base_url": os.environ.get("LEAN_PROVER_BASE_URL") or DEFAULT_BASE_URL,
+        "model": getattr(_local, "model", None) or os.environ.get("LEAN_PROVER_MODEL") or DEFAULT_MODEL,
+        "api_key": os.environ.get("LEAN_PROVER_API_KEY", ""),
+        "style": style,
+        "reasoning_effort": os.environ.get("LEAN_PROVER_REASONING_EFFORT", ""),
+    }
+
+
+class use_model:
+    """`with llm.use_model("deepseek-v4-pro"): ...` sends this thread's requests to another model."""
+
+    def __init__(self, model: str | None):
+        self.model = model or None
+
+    def __enter__(self):
+        self.prev = getattr(_local, "model", None)
+        _local.model = self.model
+
+    def __exit__(self, *exc):
+        _local.model = self.prev
+
+
+def _headers(s: dict) -> dict:
+    if s["style"] == "deepseek" and not s["api_key"]:
+        raise LLMFailure("LEAN_PROVER_API_KEY is not set (get a DeepSeek API key at https://platform.deepseek.com)")
     h = {"Content-Type": "application/json"}
-    if API_KEY:
-        h["Authorization"] = f"Bearer {API_KEY}"
+    if s["api_key"]:
+        h["Authorization"] = f"Bearer {s['api_key']}"
     return h
+
+
+def _request_body(s: dict, messages: list[dict], *, max_tokens: int, temperature: float, thinking: bool,
+                  prefill: str | None, stream: bool, n: int = 1) -> tuple[dict, str | None]:
+    """Returns (request body, the prefill actually sent). Only vLLM continues an assistant prefill."""
+    body: dict = {"model": s["model"], "messages": list(messages), "max_tokens": max_tokens}
+    if s["style"] == "vllm":
+        body.update(temperature=temperature, top_p=0.95, chat_template_kwargs={"enable_thinking": thinking})
+        if not thinking:
+            body["repetition_penalty"] = 1.05
+        if n > 1:
+            body["n"] = n
+        if prefill:
+            body["messages"].append({"role": "assistant", "content": prefill})
+            body["add_generation_prompt"] = False
+            body["continue_final_message"] = True
+    else:
+        prefill = None
+        if s["style"] == "deepseek":
+            body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        if not thinking or s["style"] == "openai":
+            body.update(temperature=temperature, top_p=0.95)  # ignored by DeepSeek in thinking mode
+        if thinking and s["reasoning_effort"]:
+            body["reasoning_effort"] = s["reasoning_effort"]
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+    return body, prefill
+
+
+def _http_error(status: int, raw: bytes) -> LLMFailure:
+    hint = {401: " (API key rejected)", 402: " (account balance exhausted)", 404: " (wrong base URL or model name)",
+            429: " (rate limited)"}.get(status, "")
+    return LLMFailure(f"HTTP {status}{hint}: {raw[:500].decode('utf-8', 'replace')}")
+
+
+def _retryable(exc: Exception) -> bool:
+    msg = str(exc)
+    return not any(msg.startswith(f"HTTP {c}") for c in (400, 401, 402, 403, 404, 422)) and "is not set" not in msg
+
+
+def ping(timeout: float = 120.0) -> str:
+    """One tiny non-thinking request, so a misconfigured endpoint fails at startup with a readable message
+    instead of every attempt failing silently. Returns the model's reply."""
+    s = settings()
+    url = urllib.parse.urlparse(s["base_url"].rstrip("/") + "/chat/completions")
+    body, _ = _request_body(s, [{"role": "user", "content": "Reply with the single word OK."}], max_tokens=16,
+                            temperature=0.0, thinking=False, prefill=None, stream=False)
+    conn = _connect(url, timeout)
+    try:
+        conn.request("POST", url.path, body=json.dumps(body), headers=_headers(s))
+        resp = conn.getresponse()
+        raw = resp.read()
+        if resp.status != 200:
+            raise _http_error(resp.status, raw)
+        d = json.loads(raw)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise LLMFailure(f"cannot reach {s['base_url']}: {exc}") from exc
+    finally:
+        conn.close()
+    return ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
 
 def _connect(url, timeout: float):
@@ -81,10 +182,6 @@ class LLMResponse:
 REPEAT_LINES = 12  # this many recent non-empty lines with at most 2 distinct values = a degenerate loop
 
 
-class LLMFailure(Exception):
-    pass
-
-
 def chat(messages: list[dict], *, max_tokens: int = 16000, temperature: float = 0.7,
          thinking: bool = True, total_timeout: float = 3600.0, retries: int = 2,
          stop_check=None, prefill: str | None = None, priority: int = 0) -> LLMResponse:
@@ -109,29 +206,19 @@ def chat(messages: list[dict], *, max_tokens: int = 16000, temperature: float = 
             last = exc
             with _stats_lock:
                 STATS["errors"] += 1
+                STATS["last_error"] = str(exc)[:300]
+            if not _retryable(exc):
+                break
             time.sleep(5 * (attempt + 1))
     raise LLMFailure(str(last))
 
 
 def _chat_once(messages, *, max_tokens, temperature, thinking, total_timeout, stop_check=None,
                prefill: str | None = None) -> LLMResponse:
-    url = urllib.parse.urlparse(BASE_URL.rstrip("/") + "/chat/completions")
-    body = {
-        "model": MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": 0.95,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-        "chat_template_kwargs": {"enable_thinking": thinking},
-    }
-    if not thinking:
-        body["repetition_penalty"] = 1.05
-    if prefill:
-        body["messages"] = list(messages) + [{"role": "assistant", "content": prefill}]
-        body["add_generation_prompt"] = False
-        body["continue_final_message"] = True
+    s = settings()
+    url = urllib.parse.urlparse(s["base_url"].rstrip("/") + "/chat/completions")
+    body, prefill = _request_body(s, messages, max_tokens=max_tokens, temperature=temperature, thinking=thinking,
+                                  prefill=prefill, stream=True)
     start = time.time()
     conn = _connect(url, 600)
     content: list[str] = []
@@ -141,10 +228,10 @@ def _chat_once(messages, *, max_tokens, temperature, thinking, total_timeout, st
     usage = None
     finish = None
     try:
-        conn.request("POST", url.path, body=json.dumps(body), headers=_headers())
+        conn.request("POST", url.path, body=json.dumps(body), headers=_headers(s))
         resp = conn.getresponse()
         if resp.status != 200:
-            raise LLMFailure(f"HTTP {resp.status}: {resp.read()[:500]!r}")
+            raise _http_error(resp.status, resp.read())
         while True:
             line = resp.readline()
             if not line:
@@ -236,16 +323,20 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
     if n <= 1:
         return [chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
                      prefill=prefill, priority=priority, stop_check=stop_check)]
-    url = urllib.parse.urlparse(BASE_URL.rstrip("/") + "/chat/completions")
-    body = {
-        "model": MODEL, "messages": list(messages), "max_tokens": max_tokens, "temperature": temperature,
-        "top_p": 0.95, "n": n, "stream": False, "repetition_penalty": 1.05,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    if prefill:
-        body["messages"] = list(messages) + [{"role": "assistant", "content": prefill}]
-        body["add_generation_prompt"] = False
-        body["continue_final_message"] = True
+    s = settings()
+    if s["style"] != "vllm":
+        # only vLLM returns several samples for one request; elsewhere send n requests side by side
+        model = s["model"]
+
+        def one(_):
+            with use_model(model):
+                return chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
+                            prefill=prefill, priority=priority, stop_check=stop_check)
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            return list(ex.map(one, range(n)))
+    url = urllib.parse.urlparse(s["base_url"].rstrip("/") + "/chat/completions")
+    body, prefill = _request_body(s, messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
+                                  prefill=prefill, stream=False, n=n)
     if not _quick_sem.acquire(priority, stop_check):
         return [LLMResponse("", "", 0, "cancelled", 0.0)]
     try:
@@ -254,11 +345,11 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
         start = time.time()
         conn = _connect(url, 1200)
         try:
-            conn.request("POST", url.path, body=json.dumps(body), headers=_headers())
+            conn.request("POST", url.path, body=json.dumps(body), headers=_headers(s))
             resp = conn.getresponse()
             raw = resp.read()
             if resp.status != 200:
-                raise LLMFailure(f"HTTP {resp.status}: {raw[:300]!r}")
+                raise _http_error(resp.status, raw)
             d = json.loads(raw)
         except (OSError, http.client.HTTPException, ValueError) as exc:
             raise LLMFailure(f"transport: {exc}") from exc

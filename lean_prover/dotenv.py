@@ -43,3 +43,22 @@ def load(path: str | os.PathLike | None = None) -> Path | None:
     for key, value in parse(text).items():
         os.environ.setdefault(key, value)
     return env_path
+
+
+def update(values: dict[str, str], path: str | os.PathLike | None = None) -> Path:
+    """Set KEY=VALUE lines in the env file (keeping other lines and comments) and in os.environ."""
+    env_path = Path(path or os.environ.get("LEAN_PROVER_ENV_FILE") or DEFAULT_ENV_FILE)
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    todo = dict(values)
+    for i, raw in enumerate(lines):
+        key = raw.strip().removeprefix("export ").partition("=")[0].strip()
+        if key in todo:
+            lines[i] = f"{key}={todo.pop(key)}"
+    lines += [f"{k}={v}" for k, v in todo.items()]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for k, v in values.items():
+        os.environ[k] = v
+    return env_path

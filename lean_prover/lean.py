@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -13,7 +14,9 @@ from .paths import ROOT, WORK_DIR as WORK
 ELAN_BIN = Path.home() / ".elan" / "bin"
 STANDARD_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 
-_compile_sem = threading.Semaphore(int(os.environ.get("LEAN_PROVER_COMPILE_JOBS", "10")))
+# each compilation needs about one core and 1-2 GB of RAM; default: half the cores, at most 10
+_compile_sem = threading.Semaphore(int(os.environ.get("LEAN_PROVER_COMPILE_JOBS")
+                                       or min(10, max(2, (os.cpu_count() or 4) // 2))))
 _cache: dict[str, "CompileResult"] = {}
 _cache_lock = threading.Lock()
 
@@ -52,6 +55,15 @@ class CompileResult:
         return None
 
 
+# keep Windows from opening a console window for every compilation when run without a console (web UI jobs)
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def _lake(env: dict) -> str:
+    # on Windows the executable is looked up in this process's PATH, not in `env`, so resolve it here
+    return shutil.which("lake", path=env.get("PATH")) or "lake"
+
+
 def compile_lean(code: str, timeout: float = 240.0) -> CompileResult:
     key = hashlib.sha256(code.encode()).hexdigest()
     with _cache_lock:
@@ -59,7 +71,7 @@ def compile_lean(code: str, timeout: float = 240.0) -> CompileResult:
             return _cache[key]
     WORK.mkdir(exist_ok=True)
     env = dict(os.environ)
-    env["PATH"] = f"{ELAN_BIN}:{env.get('PATH', '')}"
+    env["PATH"] = f"{ELAN_BIN}{os.pathsep}{env.get('PATH', '')}"
     with _compile_sem:
         fd, path = tempfile.mkstemp(suffix=".lean", dir=WORK)
         try:
@@ -67,12 +79,14 @@ def compile_lean(code: str, timeout: float = 240.0) -> CompileResult:
                 fh.write(code)
             try:
                 proc = subprocess.run(
-                    ["lake", "env", "lean", "--json", path],
+                    [_lake(env), "env", "lean", "--json", path],
                     cwd=ROOT,
                     env=env,
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
+                    **_NO_WINDOW,
                 )
             except subprocess.TimeoutExpired:
                 res = CompileResult(False, [Message(0, 0, 0, "error", f"Lean compilation timed out after {timeout:.0f}s (proof too slow: avoid heavy simp/nlinarith/decide searches)")], timed_out=True)

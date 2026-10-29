@@ -1,15 +1,48 @@
 # lean_prover
 
-A small LLM agent that proves competition mathematics in **Lean 4 + Mathlib**, with the Lean compiler as the only
-judge. It was built to run on a single locally served open-weight model and is evaluated on
-[PutnamBench](https://github.com/trishullab/PutnamBench).
+A small LLM agent that proves mathematics in **Lean 4 + Mathlib**, with the Lean compiler as the only judge.
+State a problem in plain language (or in Lean) in a local web UI, confirm the Lean statement it is translated
+into, and get a proof that Lean has checked. It uses the DeepSeek API by default and also runs on a single locally
+served open-weight model (vLLM), which is how it was evaluated on [PutnamBench](https://github.com/trishullab/PutnamBench).
 
 [中文说明](README.zh-CN.md)
+
+## Quick start
+
+**Windows:** download this repository (Code → Download ZIP, or `git clone`) into a short path such as
+`C:\lean_prover`, then double-click **`install.bat`**. It installs whatever is missing (Python, Git, Lean via
+elan), downloads Mathlib (several GB), builds a Mathlib name index (10–20 minutes, once), asks for your DeepSeek
+API key, puts a `lean_prover` shortcut on the desktop and opens the web UI. Later, start it with the shortcut or
+`start_webui.bat`.
+
+**Linux / macOS:**
+
+```bash
+git clone https://github.com/gejifeng/lean_prover.git && cd lean_prover
+./scripts/setup.sh       # Lean (elan), Mathlib cache, PutnamBench, Mathlib name index (~30 min the first time)
+./start_webui.sh         # opens http://127.0.0.1:7860
+```
+
+Get an API key at [platform.deepseek.com](https://platform.deepseek.com) and enter it under **Settings** in the
+web UI (it is stored only in `.env` in the project folder). Then:
+
+1. **Natural language** tab: write the statement, e.g. *Prove that n³ − n is divisible by 6 for every integer n*,
+   and click **Formalize**. The model writes a Lean statement; Lean checks that it compiles (errors go back to the
+   model up to 3 times); a second request that sees only the Lean code explains what it literally says.
+2. **Check the Lean statement against your problem** and edit it if needed (**Check statement** re-compiles it).
+   This is the one step Lean cannot check: a proof is a proof of the Lean statement, not of the sentence you wrote.
+   For "find all ..." problems the statement contains the answer the model proposed.
+3. Pick the model (`deepseek-v4-flash` by default, `deepseek-v4-pro` is stronger) and a time limit, then **Prove**.
+   The job page shows the live log and, when it succeeds, the verified proof to copy or download. Jobs keep running
+   if you close the page; stopping the web UI stops them.
+
+The **Lean code** tab takes a Lean statement directly: `import Mathlib`, optional definitions, and one
+`theorem name ... := by sorry`.
 
 ## Results
 
 All proofs listed here are in [`results/proofs/`](results/proofs). Each one was re-checked from scratch with
-`python -m lean_prover.report`:
+`python3 -m lean_prover.report`:
 
 - the theorem statement is identical to PutnamBench;
 - the proof contains no `sorry`;
@@ -23,7 +56,7 @@ All proofs listed here are in [`results/proofs/`](results/proofs). Each one was 
 
 Setup for all experiments:
 
-- **Model:** one open-weight model (`qwen3.8-flash-next`) served locally by vLLM, used with thinking enabled.
+- **Model:** one open-weight model (`qwen3.8-flash-next`, quantized) served locally by vLLM, used with thinking enabled.
 - **Throughput:** at most 8 concurrent requests, about 90 output tokens/s in aggregate, about 12 tokens/s per request.
 - **Lean:** v4.28.0 with Mathlib v4.28.0.
 - **Cost:** the experiments below generated about 21 million tokens in total.
@@ -118,52 +151,61 @@ problem ──▶ automation ──▶ direct attempts ──stall──▶ deco
   - a new run starts from the best earlier attempt on the same statement (`history.py`);
   - valid skeletons can be reused (`--resume-from`).
 
-## Setup
+## Setup details
 
-Requirements:
+Requirements: Windows 10/11, Linux or macOS; Python ≥ 3.10 (standard library only, no `pip install` needed);
+`git`; about 10 GB of disk for Mathlib; and a model endpoint (the DeepSeek API by default). The installers above
+take care of the rest and can be run again safely: finished steps are skipped.
 
-- Linux;
-- Python ≥ 3.10 (standard library only, no dependencies);
-- `git` and `curl`;
-- about 10 GB of disk for Mathlib;
-- an OpenAI-compatible chat endpoint.
+All settings are read from `.env` at the project root, which is git-ignored; see [`.env.example`](.env.example).
+The web UI's Settings writes the same file. Variables already set in the shell take precedence, and another file
+can be used with `LEAN_PROVER_ENV_FILE=/path/to/file`.
 
-Thinking is switched on and off with vLLM's `chat_template_kwargs.enable_thinking` (Qwen-style chat templates).
-Other servers may ignore this field.
+Other endpoints are selected with `LEAN_PROVER_API_STYLE`:
 
-```bash
-git clone <this repo> lean_prover && cd lean_prover
-./scripts/setup.sh          # elan + Lean, Mathlib cache, PutnamBench, Mathlib name index (~30 min)
+| Style | Thinking on/off | Use for |
+|---|---|---|
+| `deepseek` (default) | `thinking: {type: enabled/disabled}` | the DeepSeek API |
+| `vllm` | `chat_template_kwargs.enable_thinking` (Qwen-style templates); also uses `n` and assistant prefill | a local vLLM server |
+| `openai` | not sent (`reasoning_effort` if set) | any other OpenAI-compatible endpoint |
 
-cp .env.example .env       # then set LEAN_PROVER_BASE_URL, LEAN_PROVER_MODEL and (optionally) LEAN_PROVER_API_KEY
-```
-
-All settings are read from `.env` at the project root, which is git-ignored; see
-[`.env.example`](.env.example). Variables already set in the shell take precedence, and another file can be
-used with `LEAN_PROVER_ENV_FILE=/path/to/file`.
+Every run first sends one tiny request to the endpoint and stops with the server's error message if it fails.
 
 ## Usage
 
+The web UI covers the usual workflow. The same steps are available from the command line (on Windows use
+`python` or `py -3` instead of `python3`):
+
 ```bash
-# prove problems (outputs in runs/<run>/; FINAL_proof.lean for each solved problem)
-python -m lean_prover.campaign --set easy --hours 6 --run my_run
-python -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+# web UI (options: --port 7860, --no-browser, --host for access from other machines)
+python3 -m lean_prover.webui
+
+# natural language -> Lean statement, printed with Lean's verdict and the independent explanation
+python3 -m lean_prover.formalize "Prove that n^3 - n is divisible by 6 for every integer n."
+
+# prove your own Lean file (one `theorem name ... := by sorry` after `import Mathlib` and optional definitions)
+python3 -m lean_prover.campaign my_theorem.lean --hours 1
+
+# PutnamBench problems (outputs in runs/<run>/; FINAL_proof.lean for each solved problem)
+python3 -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+python3 -m lean_prover.campaign --set easy --hours 6 --run my_run
 
 # continue hard problems, reusing skeletons from earlier runs (lemma cache and best attempts are reused automatically)
-python -m lean_prover.campaign --set main --hours 12 --run my_run2 --resume-from my_run
+python3 -m lean_prover.campaign --set main --hours 12 --run my_run2 --resume-from my_run
 
-# re-verify all solved problems from scratch and collect them into results/proofs/
-python -m lean_prover.report all
+# re-verify all solved PutnamBench problems from scratch and collect them into results/proofs/
+python3 -m lean_prover.report all
 
 # per-run statistics: solved problems, tokens per problem, error categories
-python -m lean_prover.metrics my_run
+python3 -m lean_prover.metrics my_run
 
 # offline end-to-end self-test (scripted fake model, real Lean; no model calls)
-python -m lean_prover.selftest
+python3 -m lean_prover.selftest
 ```
 
-Search settings are in [`config/default.json`](config/default.json). The file is re-read on every use, so it can
-be edited while a campaign runs. The main knobs:
+Search settings are in [`config/default.json`](config/default.json). The defaults are the configuration that
+solved the most problems in the comparison above (e4: cheap attempts first, decompose only on stall). The file is
+re-read on every use, so it can be edited while a campaign runs. The main knobs:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -180,14 +222,16 @@ Environment variables (set them in `.env` or in the shell):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LEAN_PROVER_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint |
-| `LEAN_PROVER_MODEL` | (required) | model name served at the endpoint |
-| `LEAN_PROVER_API_KEY` | (empty) | sent as `Authorization: Bearer ...` when set |
+| `LEAN_PROVER_API_KEY` | (empty) | API key, sent as `Authorization: Bearer ...` |
+| `LEAN_PROVER_MODEL` | `deepseek-v4-flash` | model name served at the endpoint |
+| `LEAN_PROVER_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible endpoint |
+| `LEAN_PROVER_API_STYLE` | `deepseek` | `deepseek`, `vllm` or `openai` (see above) |
+| `LEAN_PROVER_REASONING_EFFORT` | (empty) | sent as `reasoning_effort` with thinking requests when set |
 | `LEAN_PROVER_LLM_JOBS` | 6 | concurrent thinking requests |
 | `LEAN_PROVER_QUICK_JOBS` | 2 | concurrent non-thinking requests |
-| `LEAN_PROVER_COMPILE_JOBS` | 10 | concurrent Lean compilations |
+| `LEAN_PROVER_COMPILE_JOBS` | half the CPU cores, ≤ 10 | concurrent Lean compilations (1–2 GB of RAM each) |
 | `PUTNAMBENCH_DIR` | `benchmarks/PutnamBench/lean4/src` | PutnamBench sources |
-| `LEAN_PROVER_RUNS_DIR` | `runs/` | campaign output directory |
+| `LEAN_PROVER_RUNS_DIR` | `runs/` | campaign output directory (web UI jobs are `runs/web_*`) |
 | `LEAN_PROVER_WORK_DIR` | `.work/` | scratch files, caches, name index |
 | `LEAN_PROVER_CONFIG` | `config/default.json` | search settings file |
 
@@ -195,12 +239,15 @@ Environment variables (set them in `.env` or in the shell):
 
 ```
 lean_prover/
-  campaign.py    command line: run a set of problems in parallel
+  webui.py       local web UI server (standard library); runs each proof as a campaign subprocess
+  web/index.html the web UI page
+  formalize.py   natural language -> compiling Lean statement + independent explanation
+  campaign.py    command line: run a set of problems (Lean files or PutnamBench names) in parallel
   decompose.py   solve(): automation → direct attempts → decomposition (recursive), lemma cache, falsity check
   agent.py       direct proof chains, prompts, feedback, runtime config
-  problem.py     PutnamBench parsing, candidate extraction, rendering and the acceptance check
+  problem.py     problem parsing (PutnamBench, user Lean files), candidate extraction, rendering, acceptance check
   lean.py        `lake env lean --json` wrapper, axiom check, compile cache
-  llm.py         streaming OpenAI-compatible client, priority scheduling, thinking-budget salvage
+  llm.py         streaming client (DeepSeek / vLLM / OpenAI styles), priority scheduling, thinking-budget salvage
   search.py      LeanSearch / Loogle retrieval checked against the local Mathlib
   names.py       real-name suggestions for unknown identifiers
   autopatch.py   deterministic repairs (automation combo + exact?, dead-tactic removal)
@@ -210,16 +257,20 @@ lean_prover/
   metrics.py     run statistics
   selftest.py    offline end-to-end test
   benchmarks.py  problem sets
-  dotenv.py      `.env` loader
+  dotenv.py      `.env` loader and writer
 config/default.json   search settings
-scripts/              setup and the Mathlib name-index generator
+install.bat           Windows one-click setup (runs scripts/install.ps1)
+start_webui.bat/.sh   start the web UI
+scripts/              setup scripts and the Mathlib name-index generator
 .env.example          template for model endpoint, API key, concurrency and paths
 results/proofs/       the 25 verified proofs
 ```
 
 ## Limitations
 
-- Throughput-bound: with about 90 tokens/s, a thinking attempt takes 20–30 minutes, so hard steps get only
+- Formalization is checked by you, not by Lean. The independent explanation helps spot mistranslations, but a
+  wrong statement (a missing hypothesis, ℕ instead of ℝ, a wrong answer) is proved just as happily as a right one.
+- Throughput-bound in the local setup used for the results: with about 90 tokens/s, a thinking attempt takes 20–30 minutes, so hard steps get only
   tens to a hundred attempts. Systems that solve such problems typically use RL-trained provers with far more samples.
 - Geometry and measure-theoretic probability are the weakest areas.
 - Answer-type problems (with a `solution` definition) are supported, but the answer itself is checked only by

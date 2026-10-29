@@ -1,13 +1,43 @@
 # lean_prover
 
-一个用 **Lean 4 + Mathlib** 证明竞赛数学题的小型 LLM 智能体，Lean 编译器是唯一的裁判。它为在单个本地部署的
-开源权重模型上运行而设计，在 [PutnamBench](https://github.com/trishullab/PutnamBench) 上评测。
+一个用 **Lean 4 + Mathlib** 证明数学命题的小型 LLM 智能体，Lean 编译器是唯一的裁判。在本地网页界面里用自然语言
+（或直接用 Lean）写下命题，确认它被翻译成的 Lean 命题，就能得到一份经过 Lean 检查的证明。默认使用 DeepSeek API，
+也可以在单个本地部署的开源权重模型（vLLM）上运行，下面在 [PutnamBench](https://github.com/trishullab/PutnamBench)
+上的评测就是这样做的。
 
 [English](README.md)
 
+## 快速开始
+
+**Windows：** 把本仓库下载（Code → Download ZIP，或 `git clone`）到一个较短的路径，比如 `C:\lean_prover`，
+然后双击 **`install.bat`**。它会安装缺少的软件（Python、Git、通过 elan 安装 Lean），下载 Mathlib（几 GB），
+建立 Mathlib 名字索引（10–20 分钟，只需一次），询问你的 DeepSeek API Key，在桌面放一个 `lean_prover` 快捷方式，
+并打开网页界面。以后用这个快捷方式或 `start_webui.bat` 启动。
+
+**Linux / macOS：**
+
+```bash
+git clone https://github.com/gejifeng/lean_prover.git && cd lean_prover
+./scripts/setup.sh       # Lean（elan）、Mathlib 缓存、PutnamBench、Mathlib 名字索引（第一次约 30 分钟）
+./start_webui.sh         # 打开 http://127.0.0.1:7860
+```
+
+在 [platform.deepseek.com](https://platform.deepseek.com) 获取 API Key，填到网页界面的「设置」里（只保存在项目目录的
+`.env` 文件中）。然后：
+
+1. 在「自然语言」页写下命题，例如「证明：对任意整数 n，n³ − n 能被 6 整除」，点「形式化为 Lean 命题」。模型写出
+   Lean 命题，Lean 检查它能否编译（出错会把错误交回模型，最多 3 次）；另一次只看 Lean 代码的独立请求会解释这个命题
+   字面上说了什么。
+2. **对照原题检查 Lean 命题**，需要时直接修改（「检查命题」会重新编译）。这是 Lean 无法替你检查的一步：证明的是
+   Lean 命题，而不是你写的那句话。对「求所有……」这类题，命题里写的是模型给出的答案。
+3. 选择模型（默认 `deepseek-v4-flash`，`deepseek-v4-pro` 更强）和时间上限，点「开始证明」。任务页面会显示实时日志，
+   成功后给出已验证的证明，可以复制或下载。关掉网页任务也会继续运行；关闭网页界面的服务会停止任务。
+
+「Lean 代码」页直接接受 Lean 命题：`import Mathlib`、可选的定义，以及一个 `theorem 名字 ... := by sorry`。
+
 ## 成果
 
-下面列出的证明都在 [`results/proofs/`](results/proofs) 中。每一份都用 `python -m lean_prover.report`
+下面列出的证明都在 [`results/proofs/`](results/proofs) 中。每一份都用 `python3 -m lean_prover.report`
 从零重新检查过：
 
 - 定理陈述与 PutnamBench 完全一致；
@@ -22,7 +52,7 @@
 
 所有实验的设置：
 
-- **模型：** 单个开源权重模型（`qwen3.8-flash-next`），用 vLLM 本地部署，开启 thinking 使用。
+- **模型：** 单个开源权重模型（`qwen3.8-flash-next`，量化版），用 vLLM 本地部署，开启 thinking 使用。
 - **吞吐：** 最多 8 个并发请求，总输出约 90 token/秒，单个请求约 12 token/秒。
 - **Lean：** v4.28.0，Mathlib v4.28.0。
 - **花费：** 下文各轮实验共生成约 2100 万 token。
@@ -116,51 +146,57 @@
   - 新一轮从同一陈述之前最好的尝试开始（`history.py`）；
   - 合格的骨架可以复用（`--resume-from`）。
 
-## 安装
+## 安装细节
 
-需要：
+需要：Windows 10/11、Linux 或 macOS；Python ≥ 3.10（只用标准库，不需要 `pip install`）；`git`；约 10 GB 磁盘空间给
+Mathlib；以及一个模型接口（默认 DeepSeek API）。其余的由上面的安装脚本完成，可以放心重复运行，已完成的步骤会跳过。
 
-- Linux；
-- Python ≥ 3.10（只用标准库，没有依赖）；
-- `git` 和 `curl`；
-- 约 10 GB 磁盘空间给 Mathlib；
-- 一个 OpenAI 兼容的 chat 接口。
+所有设置都从项目根目录的 `.env` 读取，这个文件已被 git 忽略；模板见 [`.env.example`](.env.example)。网页界面的
+「设置」写的也是这个文件。在 shell 中已经设置的变量优先；也可以用 `LEAN_PROVER_ENV_FILE=/path/to/file` 指定其他文件。
 
-thinking 的开关通过 vLLM 的 `chat_template_kwargs.enable_thinking` 控制（Qwen 风格的 chat 模板），
-其他服务端可能会忽略这个字段。
+其他接口用 `LEAN_PROVER_API_STYLE` 选择：
 
-```bash
-git clone <本仓库> lean_prover && cd lean_prover
-./scripts/setup.sh          # elan + Lean、Mathlib 缓存、PutnamBench、Mathlib 名字索引（约 30 分钟）
+| 类型 | thinking 开关 | 适用于 |
+|---|---|---|
+| `deepseek`（默认） | `thinking: {type: enabled/disabled}` | DeepSeek API |
+| `vllm` | `chat_template_kwargs.enable_thinking`（Qwen 风格模板）；还会用到 `n` 和 assistant 预填充 | 本地 vLLM 服务 |
+| `openai` | 不发送（设置了 `reasoning_effort` 时发送它） | 其他 OpenAI 兼容接口 |
 
-cp .env.example .env       # 然后填写 LEAN_PROVER_BASE_URL、LEAN_PROVER_MODEL，以及（可选的）LEAN_PROVER_API_KEY
-```
-
-所有设置都从项目根目录的 `.env` 读取，这个文件已被 git 忽略；模板见 [`.env.example`](.env.example)。
-在 shell 中已经设置的变量优先；也可以用 `LEAN_PROVER_ENV_FILE=/path/to/file` 指定其他文件。
+每次运行都会先向接口发一个很小的请求，失败时直接停止，并显示服务端返回的错误信息。
 
 ## 使用
 
+常用流程都可以在网页界面完成。命令行也能做同样的事（Windows 上把 `python3` 换成 `python` 或 `py -3`）：
+
 ```bash
-# 证明题目（输出在 runs/<run>/；每道解出的题有 FINAL_proof.lean）
-python -m lean_prover.campaign --set easy --hours 6 --run my_run
-python -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+# 网页界面（选项：--port 7860、--no-browser、--host 允许其他机器访问）
+python3 -m lean_prover.webui
+
+# 自然语言 -> Lean 命题，输出 Lean 的检查结果和独立解读
+python3 -m lean_prover.formalize "证明：对任意整数 n，n^3 - n 能被 6 整除。"
+
+# 证明你自己的 Lean 文件（`import Mathlib`、可选定义之后，一个 `theorem 名字 ... := by sorry`）
+python3 -m lean_prover.campaign my_theorem.lean --hours 1
+
+# PutnamBench 题目（输出在 runs/<run>/；每道解出的题有 FINAL_proof.lean）
+python3 -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+python3 -m lean_prover.campaign --set easy --hours 6 --run my_run
 
 # 继续攻难题，复用之前几轮的骨架（引理缓存和最好的尝试会自动复用）
-python -m lean_prover.campaign --set main --hours 12 --run my_run2 --resume-from my_run
+python3 -m lean_prover.campaign --set main --hours 12 --run my_run2 --resume-from my_run
 
-# 从零重新验证所有已解出的题，并汇总到 results/proofs/
-python -m lean_prover.report all
+# 从零重新验证所有已解出的 PutnamBench 题，并汇总到 results/proofs/
+python3 -m lean_prover.report all
 
 # 单轮统计：解出的题、每题 token、错误类别
-python -m lean_prover.metrics my_run
+python3 -m lean_prover.metrics my_run
 
 # 离线端到端自测（脚本化的假模型 + 真实 Lean；不调用模型）
-python -m lean_prover.selftest
+python3 -m lean_prover.selftest
 ```
 
-搜索设置在 [`config/default.json`](config/default.json)。这个文件每次使用时都会重新读取，所以可以在运行中修改。
-主要参数：
+搜索设置在 [`config/default.json`](config/default.json)。默认值就是上面对比中解出题目最多的配置（e4：先做便宜的尝试，
+停滞后才拆分）。这个文件每次使用时都会重新读取，所以可以在运行中修改。主要参数：
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
@@ -177,14 +213,16 @@ python -m lean_prover.selftest
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
-| `LEAN_PROVER_BASE_URL` | `http://localhost:8000/v1` | OpenAI 兼容接口地址 |
-| `LEAN_PROVER_MODEL` | （必填） | 服务端的模型名 |
-| `LEAN_PROVER_API_KEY` | （空） | 非空时作为 `Authorization: Bearer ...` 发送 |
+| `LEAN_PROVER_API_KEY` | （空） | API Key，作为 `Authorization: Bearer ...` 发送 |
+| `LEAN_PROVER_MODEL` | `deepseek-v4-flash` | 服务端的模型名 |
+| `LEAN_PROVER_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容接口地址 |
+| `LEAN_PROVER_API_STYLE` | `deepseek` | `deepseek`、`vllm` 或 `openai`（见上） |
+| `LEAN_PROVER_REASONING_EFFORT` | （空） | 设置后随 thinking 请求作为 `reasoning_effort` 发送 |
 | `LEAN_PROVER_LLM_JOBS` | 6 | 并发 thinking 请求数 |
 | `LEAN_PROVER_QUICK_JOBS` | 2 | 并发非 thinking 请求数 |
-| `LEAN_PROVER_COMPILE_JOBS` | 10 | 并发 Lean 编译数 |
+| `LEAN_PROVER_COMPILE_JOBS` | CPU 核数的一半，最多 10 | 并发 Lean 编译数（每个占 1–2 GB 内存） |
 | `PUTNAMBENCH_DIR` | `benchmarks/PutnamBench/lean4/src` | PutnamBench 源文件目录 |
-| `LEAN_PROVER_RUNS_DIR` | `runs/` | 运行输出目录 |
+| `LEAN_PROVER_RUNS_DIR` | `runs/` | 运行输出目录（网页界面的任务在 `runs/web_*`） |
 | `LEAN_PROVER_WORK_DIR` | `.work/` | 临时文件、缓存、名字索引 |
 | `LEAN_PROVER_CONFIG` | `config/default.json` | 搜索设置文件 |
 
@@ -192,12 +230,15 @@ python -m lean_prover.selftest
 
 ```
 lean_prover/
-  campaign.py    命令行：并行处理一组题目
+  webui.py       本地网页界面服务（标准库）；每个证明作为一个 campaign 子进程运行
+  web/index.html 网页界面
+  formalize.py   自然语言 -> 可编译的 Lean 命题 + 独立解读
+  campaign.py    命令行：并行处理一组题目（Lean 文件或 PutnamBench 题名）
   decompose.py   solve()：自动化 → 直接证明 → 拆分（递归）、引理缓存、真假检查
   agent.py       直接证明链、提示词、反馈、运行期配置
-  problem.py     解析 PutnamBench、提取候选证明、渲染与接受检查
+  problem.py     题目解析（PutnamBench、用户的 Lean 文件）、提取候选证明、渲染与接受检查
   lean.py        `lake env lean --json` 封装、公理检查、编译缓存
-  llm.py         流式 OpenAI 兼容客户端、优先级调度、thinking 预算挽救
+  llm.py         流式客户端（DeepSeek / vLLM / OpenAI 三种类型）、优先级调度、thinking 预算挽救
   search.py      LeanSearch / Loogle 检索，并对照本地 Mathlib 核验
   names.py       为不存在的标识符推荐真实名字
   autopatch.py   确定性修复（自动化 tactic 组合 + exact?、删除多余 tactic）
@@ -207,8 +248,10 @@ lean_prover/
   metrics.py     单轮统计
   selftest.py    离线端到端测试
   benchmarks.py  题集
-  dotenv.py      `.env` 加载器
+  dotenv.py      `.env` 读写
 config/default.json   搜索设置
+install.bat           Windows 一键安装（运行 scripts/install.ps1）
+start_webui.bat/.sh   启动网页界面
 scripts/              安装脚本与 Mathlib 名字索引生成器
 .env.example          模型接口、API key、并发与路径的配置模板
 results/proofs/       25 份已验证的证明
@@ -216,7 +259,9 @@ results/proofs/       25 份已验证的证明
 
 ## 局限
 
-- 受吞吐限制：总共约 90 token/秒，一次 thinking 尝试要 20–30 分钟，所以难点只能尝试几十到一百来次。
+- 形式化由你检查，而不是由 Lean 检查。独立解读有助于发现翻译错误，但一个错误的命题（少了假设、把 ℝ 写成 ℕ、
+  答案错了）会和正确的命题一样被认真证明。
+- 受吞吐限制（指上面结果所用的本地环境）：总共约 90 token/秒，一次 thinking 尝试要 20–30 分钟，所以难点只能尝试几十到一百来次。
   能解出这类题的系统，通常用强化学习训练过的证明模型，采样次数多得多。
 - 几何和测度论概率是最弱的领域。
 - 支持需要给出答案的题（带 `solution` 定义），但与 PutnamBench 一样，答案本身只由证明来检验。

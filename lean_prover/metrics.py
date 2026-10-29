@@ -41,7 +41,7 @@ def problem_tokens(pdir: Path) -> int:
         for l in f.read_text(encoding="utf-8").splitlines():
             tot += json.loads(l).get("tokens") or 0
     for f in pdir.rglob("plan_tokens.json"):
-        tot += json.loads(f.read_text()).get("tokens") or 0
+        tot += json.loads(f.read_text(encoding="utf-8")).get("tokens") or 0
     return tot
 
 

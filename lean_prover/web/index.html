@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lean_prover</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #dde1e8;
+  --accent: #2f5bd3; --accent-text: #ffffff; --code-bg: #f1f3f7;
+  --ok: #1d7a46; --ok-bg: #e5f4ea; --warn: #8a5a00; --warn-bg: #fff4dc; --err: #b42318; --err-bg: #fdecea;
+  --run: #2f5bd3; --run-bg: #e8eefc;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d; --panel: #1c2027; --text: #e6e9ef; --muted: #9aa3b2; --border: #2e343e;
+    --accent: #6d8ff0; --accent-text: #0d1018; --code-bg: #232831;
+    --ok: #5cc98a; --ok-bg: #173323; --warn: #e8b85a; --warn-bg: #3a2e14; --err: #f08a80; --err-bg: #3d1c1a;
+    --run: #8fa9f5; --run-bg: #1e2a47;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--border);
+  background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+header .sub { color: var(--muted); font-size: 13px; }
+header .spacer { flex: 1; }
+main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 18px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+.card h2 { font-size: 16px; margin: 0 0 12px; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+textarea, input[type=text], input[type=password], select {
+  width: 100%; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 10px; }
+textarea { resize: vertical; }
+textarea.code, pre { font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, "JetBrains Mono", monospace; }
+textarea.code { background: var(--code-bg); min-height: 180px; tab-size: 2; }
+pre { background: var(--code-bg); border-radius: 7px; padding: 10px 12px; overflow: auto; margin: 0;
+  white-space: pre-wrap; word-break: break-word; max-height: 460px; }
+button { font: inherit; border-radius: 7px; border: 1px solid var(--border); background: var(--panel);
+  color: var(--text); padding: 7px 14px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.link { border: none; background: none; color: var(--accent); padding: 4px 6px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.row > .grow { flex: 1; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
+.tabs button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.badge { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--code-bg); color: var(--muted); white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.err { background: var(--err-bg); color: var(--err); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.run { background: var(--run-bg); color: var(--run); }
+.note { border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-top: 12px; }
+.note.warn { background: var(--warn-bg); color: var(--warn); }
+.note.err { background: var(--err-bg); color: var(--err); white-space: pre-wrap; }
+.note.ok { background: var(--ok-bg); color: var(--ok); }
+.muted { color: var(--muted); font-size: 13px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chips button { font-size: 13px; padding: 3px 10px; border-radius: 999px; color: var(--muted); }
+.meaning { white-space: pre-wrap; background: var(--code-bg); border-radius: 7px; padding: 10px 12px; font-size: 14px; }
+.jobs { width: 100%; border-collapse: collapse; font-size: 14px; }
+.jobs th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.jobs td { padding: 8px; border-bottom: 1px solid var(--border); }
+.jobs tr.sel td { background: var(--code-bg); }
+.jobs tbody tr { cursor: pointer; }
+.jobs td.name { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; }
+.hidden { display: none !important; }
+dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text);
+  width: min(520px, calc(100vw - 32px)); padding: 20px; }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+.spin { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: s .8s linear infinite; vertical-align: -2px; }
+@keyframes s { to { transform: rotate(360deg); } }
+@media (max-width: 640px) { .jobs .opt { display: none; } header { padding: 10px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>lean_prover</h1>
+  <span class="sub" data-i18n="tagline"></span>
+  <span class="spacer"></span>
+  <span id="b-lean" class="badge"></span>
+  <span id="b-api" class="badge"></span>
+  <button class="link" id="btn-settings" data-i18n="settings"></button>
+  <button class="link" id="btn-lang">EN</button>
+</header>
+
+<main>
+  <div id="setup" class="note warn hidden"></div>
+
+  <section class="card">
+    <div class="tabs">
+      <button id="tab-nl" class="on" data-i18n="tabNL"></button>
+      <button id="tab-lean" data-i18n="tabLean"></button>
+    </div>
+
+    <div id="pane-nl">
+      <label for="nl" data-i18n="nlLabel"></label>
+      <textarea id="nl" rows="4"></textarea>
+      <div class="chips" id="examples"></div>
+      <div class="row">
+        <button class="primary" id="btn-formalize" data-i18n="formalize"></button>
+        <span id="f-status" class="muted"></span>
+      </div>
+    </div>
+
+    <div id="review" class="hidden">
+      <label for="lean" data-i18n="leanLabel"></label>
+      <textarea id="lean" class="code" spellcheck="false"></textarea>
+      <div id="check-status"></div>
+      <div id="meaning-box" class="hidden">
+        <label data-i18n="meaningLabel"></label>
+        <div id="meaning" class="meaning"></div>
+        <div id="notes-box" class="hidden">
+          <label data-i18n="notesLabel"></label>
+          <div id="notes" class="meaning"></div>
+        </div>
+      </div>
+      <div class="note warn" data-i18n="confirmNote"></div>
+      <div class="row">
+        <div>
+          <label for="model" data-i18n="model"></label>
+          <select id="model"></select>
+        </div>
+        <div>
+          <label for="hours" data-i18n="budget"></label>
+          <select id="hours">
+            <option value="0.25">15 min</option>
+            <option value="0.5">30 min</option>
+            <option value="1" selected>1 h</option>
+            <option value="2">2 h</option>
+            <option value="6">6 h</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btn-check" data-i18n="check"></button>
+        <button class="primary" id="btn-prove" data-i18n="prove" disabled></button>
+        <span id="p-status" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 data-i18n="jobs"></h2>
+    <div id="no-jobs" class="muted" data-i18n="noJobs"></div>
+    <table class="jobs hidden" id="jobs">
+      <thead><tr>
+        <th data-i18n="colTheorem"></th><th data-i18n="colState"></th>
+        <th class="opt" data-i18n="colModel"></th><th class="opt" data-i18n="colTime"></th><th class="opt" data-i18n="colTokens"></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="detail" class="hidden">
+      <div class="row">
+        <strong id="d-name" class="grow"></strong>
+        <span id="d-state" class="badge"></span>
+        <button id="btn-stop" data-i18n="stop"></button>
+      </div>
+      <div id="d-proof-box" class="hidden">
+        <label data-i18n="proofLabel"></label>
+        <pre id="d-proof"></pre>
+        <div class="row">
+          <button id="btn-copy" data-i18n="copy"></button>
+          <a id="d-download"><button data-i18n="download"></button></a>
+        </div>
+      </div>
+      <label data-i18n="problemLabel"></label>
+      <pre id="d-problem"></pre>
+      <label data-i18n="logLabel"></label>
+      <pre id="d-log"></pre>
+    </div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h2 style="margin-top:0" data-i18n="settings"></h2>
+  <div class="muted" data-i18n="settingsHelp"></div>
+  <label for="s-key" data-i18n="apiKey"></label>
+  <input type="password" id="s-key" autocomplete="off">
+  <label for="s-model" data-i18n="defaultModel"></label>
+  <input type="text" id="s-model" list="s-models">
+  <datalist id="s-models"></datalist>
+  <label for="s-url" data-i18n="baseUrl"></label>
+  <input type="text" id="s-url">
+  <label for="s-style" data-i18n="apiStyle"></label>
+  <select id="s-style"></select>
+  <div id="s-msg"></div>
+  <div class="row">
+    <button class="primary" id="s-save" data-i18n="save"></button>
+    <button id="s-test" data-i18n="test"></button>
+    <span class="grow"></span>
+    <button id="s-close" data-i18n="close"></button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const T = {
+  zh: {
+    tagline: "自然语言 → Lean 命题 → 由 Lean 检查的证明",
+    settings: "设置", tabNL: "自然语言", tabLean: "Lean 代码",
+    nlLabel: "用自然语言写下要证明的命题(中文或英文)",
+    formalize: "形式化为 Lean 命题", formalizing: "正在形式化…",
+    leanLabel: "Lean 命题(可直接修改;证明部分保持 sorry)",
+    meaningLabel: "另一次独立请求只看 Lean 代码给出的解读,请与原题对照",
+    notesLabel: "形式化时的歧义与取舍",
+    confirmNote: "Lean 只保证「这个 Lean 命题」被证明。开始证明前,请确认它和你想证明的数学命题含义一致:假设没有多也没有少,数的类型正确,结论(包括答案)没有被改动。",
+    model: "模型", budget: "时间上限", check: "检查命题", checking: "Lean 正在检查…",
+    prove: "开始证明", starting: "正在启动…",
+    compiles: "命题可以通过 Lean 编译(证明为 sorry),可以开始证明。",
+    notCompile: "命题无法编译:",
+    editedRecheck: "命题已修改,请重新检查。",
+    jobs: "证明任务", noJobs: "还没有任务。",
+    colTheorem: "定理", colState: "状态", colModel: "模型", colTime: "用时", colTokens: "生成 token",
+    stop: "停止", proofLabel: "已验证的证明(Lean 编译通过,无 sorry,只用标准公理)",
+    problemLabel: "命题", logLabel: "运行日志", copy: "复制证明", copied: "已复制", download: "下载 .lean",
+    st_running: "证明中", st_solved: "已证明", st_unsolved: "未证出", st_stopped: "已停止",
+    st_error: "出错", st_interrupted: "已中断",
+    apiKey: "API Key", defaultModel: "默认模型", baseUrl: "API 地址", apiStyle: "API 类型",
+    settingsHelp: "默认使用 DeepSeek API。Key 只保存在本机项目目录的 .env 文件里。留空表示不修改。",
+    save: "保存", test: "测试连接", close: "关闭", saved: "已保存。", testing: "正在测试…",
+    testOk: "连接正常。", keySet: "已配置", keyMissing: "未配置 API Key",
+    leanOk: "Lean ✓", leanMissing: "Lean 未安装",
+    setupLean: "没有找到 Lean 或 Mathlib。请先运行安装脚本:Windows 双击 install.bat,Linux/macOS 运行 ./scripts/setup.sh。",
+    setupKey: "还没有配置 API Key。点右上角「设置」填入 DeepSeek API Key(在 platform.deepseek.com 获取)。",
+    leanTemplate: "import Mathlib\n\n/-- 对任意自然数 n,n * (n + 1) 是偶数。 -/\ntheorem my_theorem (n : ℕ) : Even (n * (n + 1)) := by\n  sorry\n",
+    examples: ["证明:对任意整数 n,n^3 - n 能被 6 整除。", "证明 √2 是无理数。", "求所有满足 n^2 + 1 被 n + 1 整除的正整数 n。", "证明:对任意正实数 a, b,有 (a + b)/2 ≥ √(ab)。"],
+  },
+  en: {
+    tagline: "natural language → Lean statement → Lean-checked proof",
+    settings: "Settings", tabNL: "Natural language", tabLean: "Lean code",
+    nlLabel: "State what you want proved, in plain language",
+    formalize: "Formalize into Lean", formalizing: "Formalizing…",
+    leanLabel: "Lean statement (editable; keep the proof as sorry)",
+    meaningLabel: "What a separate request, seeing only the Lean code, says it means; compare it with your problem",
+    notesLabel: "Ambiguities and choices made while formalizing",
+    confirmNote: "Lean only guarantees that this Lean statement is proved. Before proving, check that it means what you intend: no missing or extra hypotheses, the right number types, and the conclusion (including any answer) unchanged.",
+    model: "Model", budget: "Time limit", check: "Check statement", checking: "Lean is checking…",
+    prove: "Prove", starting: "Starting…",
+    compiles: "The statement compiles (with sorry as the proof). Ready to prove.",
+    notCompile: "The statement does not compile:",
+    editedRecheck: "The statement changed; check it again.",
+    jobs: "Proof jobs", noJobs: "No jobs yet.",
+    colTheorem: "Theorem", colState: "State", colModel: "Model", colTime: "Time", colTokens: "Tokens",
+    stop: "Stop", proofLabel: "Verified proof (compiles, no sorry, standard axioms only)",
+    problemLabel: "Statement", logLabel: "Log", copy: "Copy proof", copied: "Copied", download: "Download .lean",
+    st_running: "proving", st_solved: "proved", st_unsolved: "not proved", st_stopped: "stopped",
+    st_error: "error", st_interrupted: "interrupted",
+    apiKey: "API key", defaultModel: "Default model", baseUrl: "API base URL", apiStyle: "API style",
+    settingsHelp: "DeepSeek is the default. The key is stored only in the .env file in the project folder. Leave a field empty to keep it.",
+    save: "Save", test: "Test connection", close: "Close", saved: "Saved.", testing: "Testing…",
+    testOk: "Connection works.", keySet: "configured", keyMissing: "no API key",
+    leanOk: "Lean ✓", leanMissing: "Lean missing",
+    setupLean: "Lean or Mathlib was not found. Run the installer first: install.bat on Windows, ./scripts/setup.sh on Linux/macOS.",
+    setupKey: "No API key yet. Open Settings (top right) and enter a DeepSeek API key (from platform.deepseek.com).",
+    leanTemplate: "import Mathlib\n\n/-- For every natural number n, n * (n + 1) is even. -/\ntheorem my_theorem (n : ℕ) : Even (n * (n + 1)) := by\n  sorry\n",
+    examples: ["Prove that n^3 - n is divisible by 6 for every integer n.", "Prove that √2 is irrational.", "Find all positive integers n such that n + 1 divides n^2 + 1.", "Prove that (a + b)/2 ≥ √(ab) for all positive reals a, b."],
+  },
+};
+let lang = (() => { try { return localStorage.getItem("lang"); } catch (e) { return null; } })()
+  || ((navigator.language || "zh").toLowerCase().startsWith("zh") ? "zh" : "en");
+if (!T[lang]) lang = "zh";
+const $ = (id) => document.getElementById(id);
+const t = (k) => T[lang][k] ?? k;
+
+let mode = "nl", checkedText = null, informal = "", status = null, selected = null, formalizing = false;
+
+function applyLang() {
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  $("btn-lang").textContent = lang === "zh" ? "EN" : "中文";
+  const ex = $("examples"); ex.replaceChildren();
+  t("examples").forEach((s) => { const b = document.createElement("button"); b.textContent = s; b.onclick = () => { $("nl").value = s; }; ex.append(b); });
+  renderStatus(); refreshJobs();
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Lean-Prover": "1" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+
+function setNote(el, kind, text) {
+  el.replaceChildren();
+  if (!text) return;
+  const d = document.createElement("div"); d.className = "note " + kind; d.textContent = text; el.append(d);
+}
+
+function spinner(el, text) {
+  el.replaceChildren();
+  if (!text) return;
+  const s = document.createElement("span"); s.className = "spin"; el.append(s, " " + text);
+}
+
+async function loadStatus() {
+  try { status = await api("/api/status"); } catch (e) { return; }
+  const sel = $("model"), cur = sel.value || status.settings.model;
+  const models = [...new Set([status.settings.model, ...status.settings.models])];
+  sel.replaceChildren(...models.map((m) => new Option(m, m)));
+  sel.value = models.includes(cur) ? cur : status.settings.model;
+  renderStatus();
+}
+
+function renderStatus() {
+  if (!status) return;
+  const env = status.env, s = status.settings, leanOk = env.lean && env.mathlib;
+  $("b-lean").className = "badge " + (leanOk ? "ok" : "err");
+  $("b-lean").textContent = leanOk ? t("leanOk") : t("leanMissing");
+  $("b-api").className = "badge " + (s.has_key || s.style !== "deepseek" ? "ok" : "warn");
+  $("b-api").textContent = s.model + " · " + (s.has_key ? t("keySet") : (s.style === "deepseek" ? t("keyMissing") : s.style));
+  const msgs = [];
+  if (!leanOk) msgs.push(t("setupLean"));
+  if (!s.has_key && s.style === "deepseek") msgs.push(t("setupKey"));
+  $("setup").textContent = msgs.join("\n");
+  $("setup").classList.toggle("hidden", msgs.length === 0);
+}
+
+function setMode(m) {
+  mode = m;
+  $("tab-nl").classList.toggle("on", m === "nl");
+  $("tab-lean").classList.toggle("on", m === "lean");
+  $("pane-nl").classList.toggle("hidden", m !== "nl");
+  if (m === "lean") {
+    if (!$("lean").value.trim()) $("lean").value = t("leanTemplate");
+    $("meaning-box").classList.add("hidden");
+    informal = "";
+    $("review").classList.remove("hidden");
+  } else {
+    $("review").classList.toggle("hidden", !$("lean").value.trim() || !informal);
+  }
+  syncProve();
+}
+
+function syncProve() {
+  const ok = checkedText !== null && checkedText === $("lean").value;
+  $("btn-prove").disabled = !ok;
+}
+
+async function doFormalize() {
+  const text = $("nl").value.trim();
+  if (!text || formalizing) return;
+  formalizing = true; $("btn-formalize").disabled = true;
+  spinner($("f-status"), t("formalizing"));
+  try {
+    const { id } = await api("/api/formalize", { text, model: $("model").value });
+    let task;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500));
+      task = await api("/api/formalize/" + id);
+      if (task.log.length) spinner($("f-status"), t("formalizing") + " " + task.log[task.log.length - 1]);
+      if (task.state !== "running") break;
+    }
+    if (task.state === "error") throw new Error(task.error);
+    const r = task.result;
+    informal = text;
+    $("lean").value = r.lean;
+    $("meaning").textContent = r.meaning || "";
+    $("notes").textContent = r.notes || "";
+    $("notes-box").classList.toggle("hidden", !r.notes);
+    $("meaning-box").classList.toggle("hidden", !r.meaning);
+    $("review").classList.remove("hidden");
+    checkedText = r.ok ? r.lean : null;
+    setNote($("check-status"), r.ok ? "ok" : "err", r.ok ? t("compiles") : t("notCompile") + "\n" + r.errors);
+    $("f-status").textContent = "";
+  } catch (e) {
+    $("f-status").replaceChildren(); setNote($("f-status"), "err", e.message);
+  } finally {
+    formalizing = false; $("btn-formalize").disabled = false; syncProve();
+  }
+}
+
+async function doCheck() {
+  $("btn-check").disabled = true;
+  spinner($("check-status"), t("checking"));
+  const text = $("lean").value;
+  try {
+    const r = await api("/api/check", { lean: text });
+    checkedText = r.ok ? text : null;
+    setNote($("check-status"), r.ok ? "ok" : "err", r.ok ? t("compiles") : t("notCompile") + "\n" + r.errors);
+  } catch (e) { setNote($("check-status"), "err", e.message); }
+  finally { $("btn-check").disabled = false; syncProve(); }
+}
+
+async function doProve() {
+  $("btn-prove").disabled = true;
+  spinner($("p-status"), t("starting"));
+  try {
+    const job = await api("/api/prove", { lean: $("lean").value, informal: mode === "nl" ? informal : "",
+      model: $("model").value, hours: parseFloat($("hours").value) });
+    $("p-status").textContent = "";
+    selected = job.id;
+    await refreshJobs();
+    $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) { $("p-status").replaceChildren(); setNote($("p-status"), "err", e.message); }
+  finally { syncProve(); }
+}
+
+const STATE_CLASS = { running: "run", solved: "ok", unsolved: "warn", stopped: "", error: "err", interrupted: "" };
+const fmtTime = (s) => s == null ? "" : s < 3600 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h";
+const fmtTok = (n) => !n ? "" : n < 1e6 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + "k" : (n / 1e6).toFixed(2) + "M";
+
+async function refreshJobs() {
+  let jobs;
+  try { jobs = await api("/api/jobs"); } catch (e) { return; }
+  $("no-jobs").classList.toggle("hidden", jobs.length > 0);
+  $("jobs").classList.toggle("hidden", jobs.length === 0);
+  const tb = $("jobs").querySelector("tbody"); tb.replaceChildren();
+  for (const j of jobs) {
+    const tr = document.createElement("tr");
+    if (j.id === selected) tr.className = "sel";
+    const cells = [j.name, null, j.model, fmtTime(j.elapsed_s), fmtTok(j.tokens)];
+    cells.forEach((c, i) => {
+      const td = document.createElement("td");
+      if (i === 0) td.className = "name";
+      if (i >= 2) td.className = "opt";
+      if (i === 1) { const b = document.createElement("span"); b.className = "badge " + (STATE_CLASS[j.state] || ""); b.textContent = t("st_" + j.state); td.append(b); }
+      else td.textContent = c;
+      tr.append(td);
+    });
+    tr.onclick = () => { selected = j.id; refreshJobs(); };
+    tb.append(tr);
+  }
+  if (selected) refreshDetail();
+}
+
+async function refreshDetail() {
+  let j;
+  try { j = await api("/api/jobs/" + selected); } catch (e) { return; }
+  $("detail").classList.remove("hidden");
+  $("d-name").textContent = j.name;
+  $("d-state").className = "badge " + (STATE_CLASS[j.state] || "");
+  $("d-state").textContent = t("st_" + j.state);
+  $("btn-stop").classList.toggle("hidden", j.state !== "running");
+  $("d-problem").textContent = j.problem;
+  const log = $("d-log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.textContent = j.log || "…";
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  $("d-proof-box").classList.toggle("hidden", !j.proof);
+  $("d-proof").textContent = j.proof;
+  $("d-download").href = "/api/jobs/" + j.id + "/proof.lean";
+}
+
+$("tab-nl").onclick = () => setMode("nl");
+$("tab-lean").onclick = () => setMode("lean");
+$("btn-formalize").onclick = doFormalize;
+$("btn-check").onclick = doCheck;
+$("btn-prove").onclick = doProve;
+$("lean").addEventListener("input", () => {
+  if (checkedText !== null && checkedText !== $("lean").value) setNote($("check-status"), "warn", t("editedRecheck"));
+  syncProve();
+});
+$("btn-stop").onclick = async () => { try { await api("/api/jobs/" + selected + "/stop", {}); } catch (e) {} refreshJobs(); };
+$("btn-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("d-proof").textContent); $("btn-copy").textContent = t("copied"); setTimeout(() => { $("btn-copy").textContent = t("copy"); }, 1500); } catch (e) {}
+};
+$("btn-lang").onclick = () => { lang = lang === "zh" ? "en" : "zh"; try { localStorage.setItem("lang", lang); } catch (e) {} applyLang(); };
+
+$("btn-settings").onclick = () => {
+  const s = status ? status.settings : {};
+  $("s-key").value = ""; $("s-key").placeholder = s.has_key ? t("keySet") + " (" + s.key_hint + ")" : "sk-...";
+  $("s-model").value = s.model || "";
+  $("s-models").replaceChildren(...(s.models || []).map((m) => new Option(m, m)));
+  $("s-url").value = s.base_url || "";
+  $("s-style").replaceChildren(...(s.styles || ["deepseek"]).map((m) => new Option(m, m)));
+  $("s-style").value = s.style || "deepseek";
+  $("s-msg").replaceChildren();
+  $("dlg").showModal();
+};
+$("s-close").onclick = () => $("dlg").close();
+$("s-save").onclick = async () => {
+  try {
+    await api("/api/settings", { api_key: $("s-key").value, model: $("s-model").value, base_url: $("s-url").value, style: $("s-style").value });
+    $("s-key").value = ""; setNote($("s-msg"), "ok", t("saved")); loadStatus();
+  } catch (e) { setNote($("s-msg"), "err", e.message); }
+};
+$("s-test").onclick = async () => {
+  spinner($("s-msg"), t("testing"));
+  try { const r = await api("/api/ping", { model: $("s-model").value }); setNote($("s-msg"), r.ok ? "ok" : "err", r.ok ? t("testOk") : r.error); }
+  catch (e) { setNote($("s-msg"), "err", e.message); }
+};
+
+applyLang();
+loadStatus();
+setInterval(refreshJobs, 4000);
+</script>
+</body>
+</html>
