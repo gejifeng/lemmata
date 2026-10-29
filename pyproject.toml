@@ -1,5 +1,5 @@
 [project]
-name = "lean_prover"
+name = "lemmata"
 version = "0.2.0"
 description = "A Lean-arbitrated LLM agent for mathematics: natural language -> Lean statement -> Lean-checked proof"
 readme = "README.md"
@@ -8,15 +8,15 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.scripts]
-lean-prover = "lean_prover.campaign:main"
-lean-prover-webui = "lean_prover.webui:main"
+lemmata = "lemmata.campaign:main"
+lemmata-webui = "lemmata.webui:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["lean_prover"]
+packages = ["lemmata"]
 
 [tool.setuptools.package-data]
-lean_prover = ["web/*.html"]
+lemmata = ["web/*.html"]

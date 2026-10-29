@@ -1,4 +1,4 @@
-# lean_prover
+# Lemmata
 
 A small LLM agent that proves mathematics in **Lean 4 + Mathlib**, with the Lean compiler as the only judge.
 State a problem in plain language (or in Lean) in a local web UI, confirm the Lean statement it is translated
@@ -10,18 +10,22 @@ served open-weight model (vLLM), which is how it was evaluated on [PutnamBench](
 ## Quick start
 
 **Windows:** download this repository (Code → Download ZIP, or `git clone`) into a short path such as
-`C:\lean_prover`, then double-click **`install.bat`**. It installs whatever is missing (Python, Git, Lean via
+`C:\lemmata`, then double-click **`install.bat`**. It installs whatever is missing (Python, Git, Lean via
 elan), downloads Mathlib (several GB), builds a Mathlib name index (10–20 minutes, once), asks for your DeepSeek
-API key, puts a `lean_prover` shortcut on the desktop and opens the web UI. Later, start it with the shortcut or
+API key, puts a `Lemmata` shortcut on the desktop and opens the web UI. Later, start it with the shortcut or
 `start_webui.bat`.
 
 **Linux / macOS:**
 
 ```bash
-git clone https://github.com/gejifeng/lean_prover.git && cd lean_prover
-./scripts/setup.sh       # Lean (elan), Mathlib cache, PutnamBench, Mathlib name index (~30 min the first time)
-./start_webui.sh         # opens http://127.0.0.1:7860
+git clone https://github.com/gejifeng/lemmata.git && cd lemmata
+./install.sh
 ```
+
+It does the same: checks Python 3.10+ and Git (and prints the command to install them if missing), installs Lean
+via elan, downloads Mathlib, builds the name index, asks for your API key, adds `Lemmata` to the application menu
+(a `Lemmata.command` on the desktop on macOS) and opens the web UI. Later, start it with the launcher or
+`./start_webui.sh`. Options: `--skip-name-index`, `--skip-putnambench`, `--no-shortcut`, `--no-webui`.
 
 Get an API key at [platform.deepseek.com](https://platform.deepseek.com) and enter it under **Settings** in the
 web UI (it is stored only in `.env` in the project folder). Then:
@@ -42,7 +46,7 @@ The **Lean code** tab takes a Lean statement directly: `import Mathlib`, optiona
 ## Results
 
 All proofs listed here are in [`results/proofs/`](results/proofs). Each one was re-checked from scratch with
-`python3 -m lean_prover.report`:
+`python3 -m lemmata.report`:
 
 - the theorem statement is identical to PutnamBench;
 - the proof contains no `sorry`;
@@ -159,9 +163,9 @@ take care of the rest and can be run again safely: finished steps are skipped.
 
 All settings are read from `.env` at the project root, which is git-ignored; see [`.env.example`](.env.example).
 The web UI's Settings writes the same file. Variables already set in the shell take precedence, and another file
-can be used with `LEAN_PROVER_ENV_FILE=/path/to/file`.
+can be used with `LEMMATA_ENV_FILE=/path/to/file`.
 
-Other endpoints are selected with `LEAN_PROVER_API_STYLE`:
+Other endpoints are selected with `LEMMATA_API_STYLE`:
 
 | Style | Thinking on/off | Use for |
 |---|---|---|
@@ -178,29 +182,29 @@ The web UI covers the usual workflow. The same steps are available from the comm
 
 ```bash
 # web UI (options: --port 7860, --no-browser, --host for access from other machines)
-python3 -m lean_prover.webui
+python3 -m lemmata.webui
 
 # natural language -> Lean statement, printed with Lean's verdict and the independent explanation
-python3 -m lean_prover.formalize "Prove that n^3 - n is divisible by 6 for every integer n."
+python3 -m lemmata.formalize "Prove that n^3 - n is divisible by 6 for every integer n."
 
 # prove your own Lean file (one `theorem name ... := by sorry` after `import Mathlib` and optional definitions)
-python3 -m lean_prover.campaign my_theorem.lean --hours 1
+python3 -m lemmata.campaign my_theorem.lean --hours 1
 
 # PutnamBench problems (outputs in runs/<run>/; FINAL_proof.lean for each solved problem)
-python3 -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
-python3 -m lean_prover.campaign --set easy --hours 6 --run my_run
+python3 -m lemmata.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+python3 -m lemmata.campaign --set easy --hours 6 --run my_run
 
 # continue hard problems, reusing skeletons from earlier runs (lemma cache and best attempts are reused automatically)
-python3 -m lean_prover.campaign --set main --hours 12 --run my_run2 --resume-from my_run
+python3 -m lemmata.campaign --set main --hours 12 --run my_run2 --resume-from my_run
 
 # re-verify all solved PutnamBench problems from scratch and collect them into results/proofs/
-python3 -m lean_prover.report all
+python3 -m lemmata.report all
 
 # per-run statistics: solved problems, tokens per problem, error categories
-python3 -m lean_prover.metrics my_run
+python3 -m lemmata.metrics my_run
 
 # offline end-to-end self-test (scripted fake model, real Lean; no model calls)
-python3 -m lean_prover.selftest
+python3 -m lemmata.selftest
 ```
 
 Search settings are in [`config/default.json`](config/default.json). The defaults are the configuration that
@@ -222,23 +226,23 @@ Environment variables (set them in `.env` or in the shell):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LEAN_PROVER_API_KEY` | (empty) | API key, sent as `Authorization: Bearer ...` |
-| `LEAN_PROVER_MODEL` | `deepseek-v4-flash` | model name served at the endpoint |
-| `LEAN_PROVER_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible endpoint |
-| `LEAN_PROVER_API_STYLE` | `deepseek` | `deepseek`, `vllm` or `openai` (see above) |
-| `LEAN_PROVER_REASONING_EFFORT` | (empty) | sent as `reasoning_effort` with thinking requests when set |
-| `LEAN_PROVER_LLM_JOBS` | 6 | concurrent thinking requests |
-| `LEAN_PROVER_QUICK_JOBS` | 2 | concurrent non-thinking requests |
-| `LEAN_PROVER_COMPILE_JOBS` | half the CPU cores, ≤ 10 | concurrent Lean compilations (1–2 GB of RAM each) |
+| `LEMMATA_API_KEY` | (empty) | API key, sent as `Authorization: Bearer ...` |
+| `LEMMATA_MODEL` | `deepseek-v4-flash` | model name served at the endpoint |
+| `LEMMATA_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible endpoint |
+| `LEMMATA_API_STYLE` | `deepseek` | `deepseek`, `vllm` or `openai` (see above) |
+| `LEMMATA_REASONING_EFFORT` | (empty) | sent as `reasoning_effort` with thinking requests when set |
+| `LEMMATA_LLM_JOBS` | 6 | concurrent thinking requests |
+| `LEMMATA_QUICK_JOBS` | 2 | concurrent non-thinking requests |
+| `LEMMATA_COMPILE_JOBS` | half the CPU cores, ≤ 10 | concurrent Lean compilations (1–2 GB of RAM each) |
 | `PUTNAMBENCH_DIR` | `benchmarks/PutnamBench/lean4/src` | PutnamBench sources |
-| `LEAN_PROVER_RUNS_DIR` | `runs/` | campaign output directory (web UI jobs are `runs/web_*`) |
-| `LEAN_PROVER_WORK_DIR` | `.work/` | scratch files, caches, name index |
-| `LEAN_PROVER_CONFIG` | `config/default.json` | search settings file |
+| `LEMMATA_RUNS_DIR` | `runs/` | campaign output directory (web UI jobs are `runs/web_*`) |
+| `LEMMATA_WORK_DIR` | `.work/` | scratch files, caches, name index |
+| `LEMMATA_CONFIG` | `config/default.json` | search settings file |
 
 ## Repository layout
 
 ```
-lean_prover/
+lemmata/
   webui.py       local web UI server (standard library); runs each proof as a campaign subprocess
   web/index.html the web UI page
   formalize.py   natural language -> compiling Lean statement + independent explanation
@@ -260,6 +264,7 @@ lean_prover/
   dotenv.py      `.env` loader and writer
 config/default.json   search settings
 install.bat           Windows one-click setup (runs scripts/install.ps1)
+install.sh            Linux/macOS one-click setup (runs scripts/setup.sh)
 start_webui.bat/.sh   start the web UI
 scripts/              setup scripts and the Mathlib name-index generator
 .env.example          template for model endpoint, API key, concurrency and paths

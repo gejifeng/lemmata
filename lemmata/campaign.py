@@ -1,8 +1,8 @@
 """Run the prover on a set of problems in parallel: PutnamBench names or your own Lean files.
 
-    python -m lean_prover.campaign my_theorem.lean --hours 1
-    python -m lean_prover.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
-    python -m lean_prover.campaign --set easy --hours 6 --run my_run
+    python -m lemmata.campaign my_theorem.lean --hours 1
+    python -m lemmata.campaign putnam_1977_a5 putnam_1988_b1 --hours 1
+    python -m lemmata.campaign --set easy --hours 6 --run my_run
 
 A Lean file states one goal, `theorem name ... := by sorry`, after `import Mathlib` and optional definitions.
 """
@@ -50,7 +50,7 @@ def main() -> None:
             llm.ping()
         except llm.LLMFailure as exc:
             sys.exit(f"error: the model endpoint does not work: {exc}\n"
-                     "Check LEAN_PROVER_API_KEY / LEAN_PROVER_BASE_URL / LEAN_PROVER_MODEL in .env.")
+                     "Check LEMMATA_API_KEY / LEMMATA_BASE_URL / LEMMATA_MODEL in .env.")
     names = [p.name for p in problems]
     if len(set(names)) < len(names):
         sys.exit("error: two problems have the same theorem name")

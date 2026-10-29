@@ -1,7 +1,7 @@
 """Collect the final proofs from all runs, re-verify each one from scratch, and copy the verified ones to
 results/proofs/.
 
-    python -m lean_prover.report [main|easy|all]
+    python -m lemmata.report [main|easy|all]
 
 A proof counts as verified only if it compiles, contains no `sorry`, depends only on the standard axioms
 (propext, Classical.choice, Quot.sound), and states the theorem exactly as in PutnamBench.

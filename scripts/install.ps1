@@ -47,7 +47,7 @@ function Winget-Install($id, $what) {
 $longPaths = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -ErrorAction SilentlyContinue).LongPathsEnabled
 if ($Root.Length -gt 60 -and $longPaths -ne 1) {
     Write-Host "WARNING: the project folder path is long ($($Root.Length) characters) and Windows long paths are off." -ForegroundColor Yellow
-    Write-Host "         If Mathlib fails to download or build, move the folder to e.g. C:\lean_prover, or enable long paths:" -ForegroundColor Yellow
+    Write-Host "         If Mathlib fails to download or build, move the folder to e.g. C:\lemmata, or enable long paths:" -ForegroundColor Yellow
     Write-Host "         https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation" -ForegroundColor Yellow
 }
 
@@ -138,7 +138,7 @@ Set-Content -Path ".work\python.txt" -Encoding Ascii -NoNewline -Value $Python
 Step "DeepSeek API key"
 if (-not (Test-Path ".env")) { Copy-Item ".env.example" ".env" }
 $env:PYTHONUTF8 = "1"
-$hasKey = & $Python -c "from lean_prover import llm; print(1 if llm.settings()['api_key'] else 0)"
+$hasKey = & $Python -c "from lemmata import llm; print(1 if llm.settings()['api_key'] else 0)"
 if ($hasKey -eq "1") {
     Ok "already set in .env"
 } else {
@@ -146,7 +146,7 @@ if ($hasKey -eq "1") {
     $secure = Read-Host "    DeepSeek API key" -AsSecureString
     $key = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
     if ($key.Trim()) {
-        $key.Trim() | & $Python -c "import sys; from lean_prover import dotenv; dotenv.update({'LEAN_PROVER_API_KEY': sys.stdin.readline().strip()})"
+        $key.Trim() | & $Python -c "import sys; from lemmata import dotenv; dotenv.update({'LEMMATA_API_KEY': sys.stdin.readline().strip()})"
         Ok "saved to .env"
     } else {
         Ok "skipped"
@@ -158,12 +158,12 @@ if (-not $NoShortcut) {
     Step "Desktop shortcut"
     try {
         $shell = New-Object -ComObject WScript.Shell
-        $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "lean_prover.lnk"))
+        $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "Lemmata.lnk"))
         $lnk.TargetPath = Join-Path $Root "start_webui.bat"
         $lnk.WorkingDirectory = $Root
-        $lnk.Description = "lean_prover web UI"
+        $lnk.Description = "Lemmata web UI"
         $lnk.Save()
-        Ok "lean_prover on the desktop starts the web UI"
+        Ok "Lemmata on the desktop starts the web UI"
     } catch {
         Write-Host "    could not create a shortcut; use start_webui.bat instead"
     }

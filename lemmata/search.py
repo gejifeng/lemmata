@@ -64,7 +64,7 @@ def _cached(kind: str, query: str, fetch) -> list:
     return value
 
 
-USER_AGENT = "lean_prover/0.1 (automated Lean theorem proving research)"
+USER_AGENT = "lemmata/0.1 (automated Lean theorem proving research)"
 
 
 def _http_json(req: urllib.request.Request, timeout: float = 25.0):

@@ -15,7 +15,7 @@ ELAN_BIN = Path.home() / ".elan" / "bin"
 STANDARD_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 
 # each compilation needs about one core and 1-2 GB of RAM; default: half the cores, at most 10
-_compile_sem = threading.Semaphore(int(os.environ.get("LEAN_PROVER_COMPILE_JOBS")
+_compile_sem = threading.Semaphore(int(os.environ.get("LEMMATA_COMPILE_JOBS")
                                        or min(10, max(2, (os.cpu_count() or 4) // 2))))
 _cache: dict[str, "CompileResult"] = {}
 _cache_lock = threading.Lock()

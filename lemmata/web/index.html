@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lean_prover</title>
+<title>Lemmata</title>
 <style>
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #dde1e8;
@@ -80,7 +80,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 </head>
 <body>
 <header>
-  <h1>lean_prover</h1>
+  <h1>Lemmata</h1>
   <span class="sub" data-i18n="tagline"></span>
   <span class="spacer"></span>
   <span id="b-lean" class="badge"></span>
@@ -226,7 +226,7 @@ const T = {
     save: "保存", test: "测试连接", close: "关闭", saved: "已保存。", testing: "正在测试…",
     testOk: "连接正常。", keySet: "已配置", keyMissing: "未配置 API Key",
     leanOk: "Lean ✓", leanMissing: "Lean 未安装",
-    setupLean: "没有找到 Lean 或 Mathlib。请先运行安装脚本:Windows 双击 install.bat,Linux/macOS 运行 ./scripts/setup.sh。",
+    setupLean: "没有找到 Lean 或 Mathlib。请先运行安装脚本:Windows 双击 install.bat,Linux/macOS 运行 ./install.sh。",
     setupKey: "还没有配置 API Key。点右上角「设置」填入 DeepSeek API Key(在 platform.deepseek.com 获取)。",
     leanTemplate: "import Mathlib\n\n/-- 对任意自然数 n,n * (n + 1) 是偶数。 -/\ntheorem my_theorem (n : ℕ) : Even (n * (n + 1)) := by\n  sorry\n",
     examples: ["证明:对任意整数 n,n^3 - n 能被 6 整除。", "证明 √2 是无理数。", "求所有满足 n^2 + 1 被 n + 1 整除的正整数 n。", "证明:对任意正实数 a, b,有 (a + b)/2 ≥ √(ab)。"],
@@ -256,7 +256,7 @@ const T = {
     save: "Save", test: "Test connection", close: "Close", saved: "Saved.", testing: "Testing…",
     testOk: "Connection works.", keySet: "configured", keyMissing: "no API key",
     leanOk: "Lean ✓", leanMissing: "Lean missing",
-    setupLean: "Lean or Mathlib was not found. Run the installer first: install.bat on Windows, ./scripts/setup.sh on Linux/macOS.",
+    setupLean: "Lean or Mathlib was not found. Run the installer first: install.bat on Windows, ./install.sh on Linux/macOS.",
     setupKey: "No API key yet. Open Settings (top right) and enter a DeepSeek API key (from platform.deepseek.com).",
     leanTemplate: "import Mathlib\n\n/-- For every natural number n, n * (n + 1) is even. -/\ntheorem my_theorem (n : ℕ) : Even (n * (n + 1)) := by\n  sorry\n",
     examples: ["Prove that n^3 - n is divisible by 6 for every integer n.", "Prove that √2 is irrational.", "Find all positive integers n such that n + 1 divides n^2 + 1.", "Prove that (a + b)/2 ≥ √(ab) for all positive reals a, b."],
@@ -280,7 +280,7 @@ function applyLang() {
 }
 
 async function api(path, body) {
-  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Lean-Prover": "1" }, body: JSON.stringify(body) };
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Lemmata": "1" }, body: JSON.stringify(body) };
   const r = await fetch(path, opt);
   const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
   if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);

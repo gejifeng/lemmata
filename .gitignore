@@ -1,6 +1,6 @@
 # Lean / Lake build output and Mathlib checkout
 .lake/
-# PutnamBench checkout (fetched by scripts/setup.sh)
+# PutnamBench checkout (fetched by install.sh / install.bat)
 benchmarks/
 # scratch files, caches, Mathlib name index
 .work/

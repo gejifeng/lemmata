@@ -1,9 +1,9 @@
 """Local web UI: natural language -> Lean statement (confirmed by you) -> proof.
 
-    python -m lean_prover.webui              # opens http://127.0.0.1:7860
-    python -m lean_prover.webui --port 8000 --no-browser
+    python -m lemmata.webui              # opens http://127.0.0.1:7860
+    python -m lemmata.webui --port 8000 --no-browser
 
-Standard library only. Each proof runs as a `lean_prover.campaign` subprocess with its output in
+Standard library only. Each proof runs as a `lemmata.campaign` subprocess with its output in
 runs/web_<id>/, so a proof survives a page reload and can be stopped from the page. Closing the server stops
 running proofs. The server listens on 127.0.0.1 only unless --host is given.
 """
@@ -60,15 +60,15 @@ def public_settings() -> dict:
 def save_settings(body: dict) -> dict:
     values = {}
     if (body.get("api_key") or "").strip():
-        values["LEAN_PROVER_API_KEY"] = body["api_key"].strip()
-    for field, key in (("base_url", "LEAN_PROVER_BASE_URL"), ("model", "LEAN_PROVER_MODEL"),
-                       ("style", "LEAN_PROVER_API_STYLE")):
+        values["LEMMATA_API_KEY"] = body["api_key"].strip()
+    for field, key in (("base_url", "LEMMATA_BASE_URL"), ("model", "LEMMATA_MODEL"),
+                       ("style", "LEMMATA_API_STYLE")):
         v = (body.get(field) or "").strip()
         if v:
             if "\n" in v or "\r" in v:
                 raise ValueError(f"invalid {field}")
             values[key] = v
-    if values.get("LEAN_PROVER_API_STYLE", "deepseek") not in llm.API_STYLES:
+    if values.get("LEMMATA_API_STYLE", "deepseek") not in llm.API_STYLES:
         raise ValueError("unknown API style")
     if values:
         dotenv.update(values)
@@ -122,8 +122,8 @@ def start_job(lean: str, informal: str, model: str | None, hours: float) -> dict
     meta = {"id": jid, "name": problem.name, "model": model, "hours": hours, "informal": informal,
             "statement": problem.statement, "created": time.time()}
     (d / "job.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    env = dict(os.environ, LEAN_PROVER_MODEL=model, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    cmd = [sys.executable, "-m", "lean_prover.campaign", str(d / "problem.lean"), "--run", d.name,
+    env = dict(os.environ, LEMMATA_MODEL=model, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    cmd = [sys.executable, "-m", "lemmata.campaign", str(d / "problem.lean"), "--run", d.name,
            "--hours", f"{hours:g}"]
     kw: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
     with (d / "stdout.log").open("w", encoding="utf-8") as fh:
@@ -229,7 +229,7 @@ def _stop_all() -> None:
 # --- HTTP ----------------------------------------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "lean_prover"
+    server_version = "lemmata"
     allowed_hosts: set[str] = set()
 
     def log_message(self, fmt, *args):  # keep the console quiet
@@ -281,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         # a custom header cannot be sent cross-site without a CORS preflight, which this server never grants
-        if not self._host_ok() or self.headers.get("X-Lean-Prover") != "1":
+        if not self._host_ok() or self.headers.get("X-Lemmata") != "1":
             return self._send(403, b"forbidden", "text/plain")
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -321,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="lean_prover web UI")
+    ap = argparse.ArgumentParser(description="Lemmata web UI")
     ap.add_argument("--host", default="127.0.0.1", help="address to listen on (default: this computer only)")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser window")
@@ -344,9 +344,9 @@ def main() -> None:
               flush=True)
     url = f"http://127.0.0.1:{port}"
     env = environment()
-    print(f"lean_prover web UI: {url}  (Ctrl+C to stop)", flush=True)
+    print(f"Lemmata web UI: {url}  (Ctrl+C to stop)", flush=True)
     if not (env["lean"] and env["mathlib"]):
-        print("warning: Lean/Mathlib not found; run scripts/setup.sh (Linux/macOS) or install.bat (Windows) first",
+        print("warning: Lean/Mathlib not found; run ./install.sh (Linux/macOS) or install.bat (Windows) first",
               flush=True)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

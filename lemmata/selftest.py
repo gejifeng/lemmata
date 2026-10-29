@@ -1,6 +1,6 @@
 """Offline end-to-end self-test of the solve() pipeline with a scripted fake model (no LLM calls, real Lean).
 
-    python -m lean_prover.selftest
+    python -m lemmata.selftest
 """
 from __future__ import annotations
 

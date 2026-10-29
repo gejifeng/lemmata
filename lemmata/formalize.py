@@ -1,6 +1,6 @@
 """Natural language -> Lean theorem statement, for a human to confirm before anything is proved.
 
-    python -m lean_prover.formalize "Prove that n^3 - n is divisible by 6 for every integer n."
+    python -m lemmata.formalize "Prove that n^3 - n is divisible by 6 for every integer n."
 
 The model writes a Lean file that states the problem with `sorry` as the proof; it must compile (errors are fed
 back, up to `attempts` times). A second, independent request sees only the Lean code and explains what it

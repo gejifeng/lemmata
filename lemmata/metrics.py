@@ -1,6 +1,6 @@
 """Per-run metrics: solved problems, tokens per problem / per solve, and error-category shares.
 
-    python -m lean_prover.metrics RUN [RUN ...]
+    python -m lemmata.metrics RUN [RUN ...]
 """
 from __future__ import annotations
 

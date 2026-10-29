@@ -27,15 +27,15 @@ class LLMFailure(Exception):
 
 def settings() -> dict:
     """Endpoint settings, read from the environment on every call so the web UI can change them at runtime."""
-    style = (os.environ.get("LEAN_PROVER_API_STYLE") or "deepseek").strip().lower()
+    style = (os.environ.get("LEMMATA_API_STYLE") or "deepseek").strip().lower()
     if style not in API_STYLES:
-        raise LLMFailure(f"LEAN_PROVER_API_STYLE must be one of {', '.join(API_STYLES)}, not {style!r}")
+        raise LLMFailure(f"LEMMATA_API_STYLE must be one of {', '.join(API_STYLES)}, not {style!r}")
     return {
-        "base_url": os.environ.get("LEAN_PROVER_BASE_URL") or DEFAULT_BASE_URL,
-        "model": getattr(_local, "model", None) or os.environ.get("LEAN_PROVER_MODEL") or DEFAULT_MODEL,
-        "api_key": os.environ.get("LEAN_PROVER_API_KEY", ""),
+        "base_url": os.environ.get("LEMMATA_BASE_URL") or DEFAULT_BASE_URL,
+        "model": getattr(_local, "model", None) or os.environ.get("LEMMATA_MODEL") or DEFAULT_MODEL,
+        "api_key": os.environ.get("LEMMATA_API_KEY", ""),
         "style": style,
-        "reasoning_effort": os.environ.get("LEAN_PROVER_REASONING_EFFORT", ""),
+        "reasoning_effort": os.environ.get("LEMMATA_REASONING_EFFORT", ""),
     }
 
 
@@ -55,7 +55,7 @@ class use_model:
 
 def _headers(s: dict) -> dict:
     if s["style"] == "deepseek" and not s["api_key"]:
-        raise LLMFailure("LEAN_PROVER_API_KEY is not set (get a DeepSeek API key at https://platform.deepseek.com)")
+        raise LLMFailure("LEMMATA_API_KEY is not set (get a DeepSeek API key at https://platform.deepseek.com)")
     h = {"Content-Type": "application/json"}
     if s["api_key"]:
         h["Authorization"] = f"Bearer {s['api_key']}"
@@ -163,8 +163,8 @@ class PrioritySemaphore:
             self._cv.notify_all()
 
 
-_llm_sem = PrioritySemaphore(int(os.environ.get("LEAN_PROVER_LLM_JOBS", "6")))  # thinking requests
-_quick_sem = PrioritySemaphore(int(os.environ.get("LEAN_PROVER_QUICK_JOBS", "2")))  # non-thinking requests
+_llm_sem = PrioritySemaphore(int(os.environ.get("LEMMATA_LLM_JOBS", "6")))  # thinking requests
+_quick_sem = PrioritySemaphore(int(os.environ.get("LEMMATA_QUICK_JOBS", "2")))  # non-thinking requests
 
 _stats_lock = threading.Lock()
 STATS = {"calls": 0, "completion_tokens": 0, "reasoning_tokens": 0, "errors": 0, "seconds": 0.0}
