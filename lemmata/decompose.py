@@ -10,7 +10,9 @@ from pathlib import Path
 
 from . import llm
 from .agent import SYSTEM, ProblemState, run_chain
-from .problem import Candidate, Problem, _split_decls, check, extract_candidate, format_feedback, prune_unused, render
+from .problem import (
+    Candidate, Problem, _split_decls, candidate_block, check, extract_candidate, format_feedback, prune_unused, render,
+)
 from .lean import compile_lean
 
 SKETCH_SYSTEM = SYSTEM.replace(
@@ -199,7 +201,9 @@ def validate_skeleton(problem: Problem, sk: Skeleton, ancestors: frozenset[str] 
 
 def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 4, cancelled=None,
                   priority: int = 0, premises: str = "", plan: str = "",
-                  ancestors: frozenset[str] = frozenset()) -> Skeleton | None:
+                  ancestors: frozenset[str] = frozenset(), depth: int = 0) -> Skeleton | None:
+    from .agent import runtime_config
+    save_traj = bool(runtime_config().get("save_trajectories", True))
     extra = ""
     if problem.context:
         extra += ("\nAll declarations shown above the target theorem are ALREADY available in the file; "
@@ -217,9 +221,13 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
     for rnd in range(rounds):
         if cancelled is not None and cancelled():
             return None
+        msg_snap = [{"role": m.get("role", ""), "content": m.get("content", "")}
+                    for m in messages] if save_traj else []
         try:
-            resp = llm.chat_salvage(messages, max_tokens=32000, temperature=0.8, stop_check=cancelled, priority=priority,
-                                   final_instruction="Output the informal proof briefly, then one ```lean block with defs, helper lemmas (`:= by sorry`) and the full main theorem.")
+            with llm.trace_context(dir=out_dir, problem=problem.name, depth=depth, stage="sketch", round=rnd,
+                                   enabled=save_traj):
+                resp = llm.chat_salvage(messages, max_tokens=32000, temperature=0.8, stop_check=cancelled, priority=priority,
+                                        final_instruction="Output the informal proof briefly, then one ```lean block with defs, helper lemmas (`:= by sorry`) and the full main theorem.")
         except llm.LLMFailure:
             return None
         if resp.finish_reason == "cancelled":
@@ -228,8 +236,18 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
         fb = ("Output one ```lean block with the defs, helper lemmas (proved by sorry) and the full main theorem."
               if sk is None else validate_skeleton(problem, sk, ancestors))
         with (out_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"round": rnd, "ok": fb is None, "feedback": fb, "content": resp.content,
-                                 "tokens": resp.completion_tokens}, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({
+                "round": rnd,
+                "ok": fb is None,
+                "feedback": fb,
+                "reasoning": (getattr(resp, "reasoning", "") if save_traj else ""),
+                "reasoning_tokens": int(getattr(resp, "reasoning_tokens", 0) or 0),
+                "content": resp.content,
+                "clean_block": (candidate_block(problem, sk.candidate) if sk is not None else ""),
+                "tokens": resp.completion_tokens,
+                "seconds": round(resp.seconds, 3),
+                "messages": msg_snap,
+            }, ensure_ascii=False) + "\n")
         if fb is None:
             return sk
         messages.append({"role": "assistant", "content": resp.content[-8000:]})
@@ -620,7 +638,8 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                     rendered_sk, _ = render(problem, cand_sk.candidate, check_axioms=False)
                     raw_h = f"```lean4\n{rendered_sk}```"
                     with (sk_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"round": "harvested", "ok": True, "feedback": None, "content": raw_h},
+                        fh.write(json.dumps({"round": "harvested", "ok": True, "feedback": None, "content": raw_h,
+                                             "clean_block": candidate_block(problem, cand_sk.candidate)},
                                             ensure_ascii=False) + "\n")
             while sk is None:
                 with seeds_lock:
@@ -632,7 +651,8 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                     sk = cand_sk
                     log(f"[depth {depth}] {problem.name}: resumed skeleton from a previous run")
                     with (sk_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"round": "resumed", "ok": True, "feedback": None, "content": raw},
+                        fh.write(json.dumps({"round": "resumed", "ok": True, "feedback": None, "content": raw,
+                                             "clean_block": candidate_block(problem, cand_sk.candidate)},
                                             ensure_ascii=False) + "\n")
             if sk is None:
                 from .agent import ensure_prep
@@ -641,7 +661,7 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                 sk = make_skeleton(problem, sk_dir, failures, cancelled=cancelled,
                                    priority=int(cfg.get("depth_weight", 2)) * depth + 1 - root["calls"] // int(cfg.get("fair_share_calls", 1)),
                                    premises=state.premises or "", plan=state.plan or "",
-                                   ancestors=cur_ancestors)
+                                   ancestors=cur_ancestors, depth=depth)
             if sk is None:
                 log(f"[depth {depth}] {problem.name}: sketch {s} invalid")
                 continue

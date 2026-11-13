@@ -15,5 +15,6 @@
   "fair_share_calls": 3,
   "depth_weight": 2,
   "resume_previous": true,
-  "lemma_cache": true
+  "lemma_cache": true,
+  "save_trajectories": true
 }

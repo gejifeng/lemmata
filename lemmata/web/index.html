@@ -165,6 +165,7 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
       <div class="row">
         <strong id="d-name" class="grow"></strong>
         <span id="d-state" class="badge"></span>
+        <a id="d-dataset"><button data-i18n="exportDataset"></button></a>
         <button id="btn-stop" data-i18n="stop"></button>
       </div>
       <div id="d-proof-box" class="hidden">
@@ -225,6 +226,7 @@ const T = {
     colTheorem: "定理", colState: "状态", colModel: "模型", colTime: "用时", colTokens: "生成 token",
     stop: "停止", proofLabel: "已验证的证明(Lean 编译通过,无 sorry,只用标准公理)",
     problemLabel: "命题", logLabel: "运行日志", copy: "复制证明", copied: "已复制", download: "下载 .lean",
+    exportDataset: "导出训练数据 (.jsonl)",
     st_running: "证明中", st_solved: "已证明", st_unsolved: "未证出", st_stopped: "已停止",
     st_error: "出错", st_interrupted: "已中断",
     apiKey: "API Key", defaultModel: "默认模型", baseUrl: "API 地址", apiStyle: "API 类型",
@@ -255,6 +257,7 @@ const T = {
     colTheorem: "Theorem", colState: "State", colModel: "Model", colTime: "Time", colTokens: "Tokens",
     stop: "Stop", proofLabel: "Verified proof (compiles, no sorry, standard axioms only)",
     problemLabel: "Statement", logLabel: "Log", copy: "Copy proof", copied: "Copied", download: "Download .lean",
+    exportDataset: "Export dataset (.jsonl)",
     st_running: "proving", st_solved: "proved", st_unsolved: "not proved", st_stopped: "stopped",
     st_error: "error", st_interrupted: "interrupted",
     apiKey: "API key", defaultModel: "Default model", baseUrl: "API base URL", apiStyle: "API style",
@@ -454,6 +457,7 @@ async function refreshDetail() {
   $("d-proof-box").classList.toggle("hidden", !j.proof);
   $("d-proof").textContent = j.proof;
   $("d-download").href = "/api/jobs/" + j.id + "/proof.lean";
+  $("d-dataset").href = "/api/jobs/" + j.id + "/dataset.jsonl";
 }
 
 $("tab-nl").onclick = () => setMode("nl");

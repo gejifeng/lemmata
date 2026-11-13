@@ -212,6 +212,7 @@ python3 -m lemmata.selftest
 | `two_stage` | false | 形式化之前先写非形式计划（在我们的吞吐下反而更差） |
 | `fair_share_calls` | 3 | 一道题每用掉 N 次模型调用，优先级降 1 |
 | `resume_previous` / `lemma_cache` | true / true | 复用之前几轮的尝试和引理 |
+| `save_trajectories` | true | 无损落盘完整提示 `messages` 与 `<think>` 思维链 `reasoning`（`llm_calls.jsonl`、`attempts.jsonl`、`skeletons.jsonl`），可用 `python3 -m lemmata.dataset` 或网页端一键导出 SFT/DPO/RL 训练数据 |
 
 环境变量（写在 `.env` 里，或在 shell 中设置）：
 

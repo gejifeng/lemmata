@@ -9,7 +9,9 @@ from pathlib import Path
 
 from . import llm
 from .history import error_count
-from .problem import Candidate, Problem, Verdict, check, extract_candidate, format_feedback, prune_unused, render
+from .problem import (
+    Candidate, Problem, Verdict, candidate_block, check, extract_candidate, format_feedback, prune_unused, render,
+)
 
 SYSTEM = """\
 You are an expert competition mathematician and an expert in Lean 4 with a recent Mathlib (2026, Lean v4.28).
@@ -86,6 +88,12 @@ class Attempt:
     seconds: float
     code: str
     raw: str = ""
+    reasoning: str = ""
+    reasoning_tokens: int = 0
+    clean_block: str = ""
+    model_code: str = ""
+    patched: bool = False
+    messages: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +154,7 @@ DEFAULT_CONFIG = {
     "depth_weight": 2,            # priority bonus per decomposition level
     "resume_previous": True,      # start from the best earlier attempt on the same statement
     "lemma_cache": True,          # reuse lemmas proved in earlier runs
+    "save_trajectories": True,    # persist full LLM messages and `<think>` reasoning traces
 }
 
 
@@ -159,9 +168,15 @@ def runtime_config() -> dict:
     return cfg
 
 
-def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, mode: str):
+def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, mode: str,
+              prompt_messages: list[dict] | None = None):
     """Returns (solved, feedback, code_or_None)."""
     problem = state.problem
+    save_traj = bool(runtime_config().get("save_trajectories", True))
+    msg_snap = [{"role": m.get("role", ""), "content": m.get("content", "")}
+                for m in (prompt_messages or [])] if save_traj else []
+    r_text = getattr(resp, "reasoning", "") or ""
+    r_toks = int(getattr(resp, "reasoning_tokens", 0) or 0)
     if content.count("```") % 2 == 1:
         content = content + "\n```"
     cand = extract_candidate(problem, content)
@@ -171,10 +186,13 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
         if resp.finish_reason == "length":
             fb = "You ran out of output budget before producing code. Think more concisely and output the ```lean block."
         state.record(Attempt(chain_id, rnd, f"{mode}: no code", False, fb, resp.completion_tokens, resp.seconds, "",
-                             raw=content))
+                             raw=content, reasoning=(r_text if save_traj else ""), reasoning_tokens=r_toks,
+                             messages=msg_snap))
         return False, fb, None
     cand = prune_unused(cand)
     verdict = check(problem, cand)
+    orig_code = verdict.code
+    patched = False
     if not verdict.solved and verdict.result.errors and "forbidden" not in verdict.reason:
         try:
             from .autopatch import remove_dead_tactics
@@ -188,6 +206,7 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
                     if v2.solved or len(v2.result.errors) < len(verdict.result.errors):
                         cand, verdict = new_cand, v2
                         mode = mode + "+deadtac"
+                        patched = True
         except Exception:
             pass
     if not verdict.solved and verdict.result.errors and "forbidden" not in verdict.reason:
@@ -203,6 +222,7 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
                     if v2.solved or len(v2.result.errors) < len(verdict.result.errors):
                         cand, verdict = patched_cand, v2
                         mode = mode + "+autopatch"
+                        patched = True
         except Exception:
             pass
     bare_sorry = not cand.helpers.strip() and re.sub(r"--[^\n]*", "", cand.body).strip() == "sorry"
@@ -230,8 +250,12 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
         with state.lock:
             if state.solved_candidate is None:
                 state.solved_candidate = cand
+    cblock = candidate_block(problem, cand)
     state.record(Attempt(chain_id, rnd, f"{mode}: {verdict.reason}", verdict.solved, fb, resp.completion_tokens,
-                         resp.seconds, verdict.code, raw=content))
+                         resp.seconds, verdict.code, raw=content,
+                         reasoning=(r_text if save_traj else ""), reasoning_tokens=r_toks,
+                         clean_block=cblock, model_code=(orig_code if patched else ""), patched=patched,
+                         messages=msg_snap))
     shown, _ = render(problem, cand, check_axioms=False)
     return verdict.solved, fb, shown
 
@@ -293,14 +317,17 @@ Be concise: at most about 60 lines in total.
 def ensure_prep(state: ProblemState, hint: str, priority: int, stop, depth: int = 0) -> None:
     """Compute premises (search) and, in two-stage mode, the informal plan, once per problem state."""
     cfg = runtime_config()
-    with state.prep_lock:
+    save_traj = bool(cfg.get("save_trajectories", True))
+    with state.prep_lock, llm.trace_context(dir=state.out_dir, problem=state.problem.name, depth=depth,
+                                            enabled=save_traj):
         if state.premises is None:
             state.premises = ""
             if cfg.get("search"):
                 try:
                     from . import search
-                    qs = search.propose_queries(state.problem.statement + ("\n" + hint[-1500:] if hint else ""),
-                                                priority=priority + 2)
+                    with llm.trace_context(stage="query_gen"):
+                        qs = search.propose_queries(state.problem.statement + ("\n" + hint[-1500:] if hint else ""),
+                                                    priority=priority + 2)
                     prems = search.search(qs, k=5, limit=14)
                     state.premises = search.render_premises(prems)
                     (state.out_dir / "premises.txt").write_text("queries: " + json.dumps(qs, ensure_ascii=False)
@@ -314,18 +341,27 @@ def ensure_prep(state: ProblemState, hint: str, priority: int, stop, depth: int 
             prompt = PLAN_PROMPT.format(header=state.problem.header, display=state.problem.display(),
                                         hint=(f"\nContext from the overall proof:\n{hint[-2500:]}\n" if hint else ""),
                                         premises=(f"\n{state.premises}\n" if state.premises else ""))
+            plan_msgs = [
+                {"role": "system", "content": "You are an expert competition mathematician who also knows Lean 4 and Mathlib well."},
+                {"role": "user", "content": prompt},
+            ]
             try:
-                r = llm.chat_salvage([{"role": "system", "content": "You are an expert competition mathematician who also knows Lean 4 and Mathlib well."},
-                                      {"role": "user", "content": prompt}],
-                                     max_tokens=int(cfg["plan_max_tokens"]), temperature=0.6, stop_check=stop,
-                                     final_instruction="Write the informal proof and formalization notes now (no Lean code).",
-                                     prefill=None, priority=priority)
+                with llm.trace_context(stage="plan"):
+                    r = llm.chat_salvage(plan_msgs, max_tokens=int(cfg["plan_max_tokens"]), temperature=0.6,
+                                         stop_check=stop,
+                                         final_instruction="Write the informal proof and formalization notes now (no Lean code).",
+                                         prefill=None, priority=priority)
             except llm.LLMFailure:
                 return
             if r.finish_reason != "cancelled":
                 state.plan = r.content.strip()[-6000:]
                 (state.out_dir / "plan.md").write_text(state.plan, encoding="utf-8")
-                (state.out_dir / "plan_tokens.json").write_text(json.dumps({"tokens": r.completion_tokens}), encoding="utf-8")
+                (state.out_dir / "plan_tokens.json").write_text(json.dumps({
+                    "tokens": r.completion_tokens,
+                    "reasoning_tokens": getattr(r, "reasoning_tokens", 0),
+                    "reasoning": (r.reasoning if save_traj else ""),
+                    "messages": (plan_msgs if save_traj else []),
+                }, ensure_ascii=False), encoding="utf-8")
 
 
 def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", temperature: float = 0.8,
@@ -366,34 +402,17 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
         if stop():
             return state.solved
         cfg = runtime_config()
+        save_traj = bool(cfg.get("save_trajectories", True))
         before = state.best_errors
         think_budget = int(cfg["formalize_max_tokens"] if state.plan else cfg["think_max_tokens"])
-        try:
-            resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
-                                    final_instruction="Output exactly one ```lean block with helper lemmas and the full theorem with proof.",
-                                    stop_check=stop, priority=prio())
-        except llm.LLMFailure as exc:
-            state.record(Attempt(chain_id, rnd, f"llm failure: {exc}", False, "", 0, 0.0, ""))
-            return False
-        root["calls"] += 1
-        if resp.finish_reason == "cancelled":
-            return state.solved
-        sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
-        if (sr or "```search" in resp.content) and extract_candidate(problem, resp.content) is None:
-            search_reply = sr or "Search is disabled or returned nothing usable."
-            messages.append({"role": "assistant", "content": resp.content[-8000:] or "(search)"})
-            messages.append({"role": "user", "content": (
-                search_reply + "\n\nDo NOT output another ```search block. If the exact lemma you wanted is not "
-                "listed above, prove the step directly from definitions or as an explicit `have ... := by` helper. "
-                "Now write the complete proof in one ```lean block (helpers + full theorem).")})
-            if len(messages) > 8:
-                messages = messages[:2] + messages[-6:]
-            if stop():
-                return state.solved
+        with llm.trace_context(dir=state.out_dir, problem=problem.name, depth=depth, chain=chain_id, round=rnd,
+                               enabled=save_traj):
+            used_msgs = list(messages)
             try:
-                resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
-                                        final_instruction="Output ONLY one ```lean block with helper lemmas and the full theorem with proof (no ```search).",
-                                        stop_check=stop, priority=prio())
+                with llm.trace_context(stage="think"):
+                    resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
+                                            final_instruction="Output exactly one ```lean block with helper lemmas and the full theorem with proof.",
+                                            stop_check=stop, priority=prio())
             except llm.LLMFailure as exc:
                 state.record(Attempt(chain_id, rnd, f"llm failure: {exc}", False, "", 0, 0.0, ""))
                 return False
@@ -401,82 +420,110 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
             if resp.finish_reason == "cancelled":
                 return state.solved
             sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
-            if "```search" in resp.content and extract_candidate(problem, resp.content) is None and not stop():
-                salvage_msgs = messages + [
-                    {"role": "assistant", "content": resp.content[-4000:]},
-                    {"role": "user", "content": (
-                        (sr + "\n\n" if sr else "") +
-                        ("<reasoning>\n" + resp.reasoning[-16000:] + "\n</reasoning>\n\n" if resp.reasoning else "") +
-                        "Stop searching. Write the complete Lean 4 proof immediately in one ```lean block "
-                        "(helpers + full theorem), proving any missing steps directly from definitions.")},
-                ]
-                try:
-                    resp2 = llm.chat(salvage_msgs, max_tokens=int(cfg["repair_max_tokens"]), temperature=0.3,
-                                     thinking=False, prefill="```lean4\n", stop_check=stop, priority=prio() + 1)
-                    root["calls"] += 1
-                    if resp2.finish_reason == "cancelled":
-                        return state.solved
-                    resp = llm.LLMResponse(resp2.content, resp.reasoning,
-                                           resp.completion_tokens + resp2.completion_tokens,
-                                           resp2.finish_reason, resp.seconds + resp2.seconds)
-                    sr = ""
-                except llm.LLMFailure:
-                    pass
-        solved, fb, code = _evaluate(state, chain_id, rnd, resp.content, resp, "think")
-        if solved:
-            return True
-        if sr:
-            fb = (fb + "\n\n" + sr) if code is not None else sr
-        last_assistant = resp.content[-8000:] or "(no answer)"
-        # cheap non-thinking repairs of the concrete compiler errors, several samples per request
-        if code is not None:
-            think_mod_len = _model_code_len(problem, code)
-            for q in range(int(cfg["quick_repairs"])):
+            if (sr or "```search" in resp.content) and extract_candidate(problem, resp.content) is None:
+                search_reply = sr or "Search is disabled or returned nothing usable."
+                messages.append({"role": "assistant", "content": resp.content[-8000:] or "(search)"})
+                messages.append({"role": "user", "content": (
+                    search_reply + "\n\nDo NOT output another ```search block. If the exact lemma you wanted is not "
+                    "listed above, prove the step directly from definitions or as an explicit `have ... := by` helper. "
+                    "Now write the complete proof in one ```lean block (helpers + full theorem).")})
+                if len(messages) > 8:
+                    messages = messages[:2] + messages[-6:]
                 if stop():
                     return state.solved
-                cur_score = error_count(fb)
-                if cur_score == 0:
-                    break
-                cur_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code)))
-                repair_msgs = messages + [
-                    {"role": "assistant", "content": "```lean4\n" + code + "\n```"},
-                    {"role": "user", "content": "Lean rejected this code. Compiler output:\n\n" + fb +
-                     "\n\nRepair these specific errors while keeping the mathematical construction intact "
-                     "(do NOT replace nontrivial constructions with trivial stubs just to silence errors). "
-                     "Never keep a non-existent identifier: use a verified declaration from the hints "
-                     "(adapting subtype/bundled arguments if needed) or prove the step inline via `have ... := by ...`. "
-                     "Output the complete corrected code (helpers + full theorem) in one ```lean block, no explanation."},
-                ]
+                used_msgs = list(messages)
                 try:
-                    samples = llm.chat_n(repair_msgs, int(cfg.get("repair_samples", 1)),
-                                         max_tokens=int(cfg["repair_max_tokens"]), temperature=0.4 + 0.2 * q,
-                                         prefill="```lean4\n", priority=prio() + 1, stop_check=stop)
-                except llm.LLMFailure:
-                    break
+                    with llm.trace_context(stage="think_after_search"):
+                        resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
+                                                final_instruction="Output ONLY one ```lean block with helper lemmas and the full theorem with proof (no ```search).",
+                                                stop_check=stop, priority=prio())
+                except llm.LLMFailure as exc:
+                    state.record(Attempt(chain_id, rnd, f"llm failure: {exc}", False, "", 0, 0.0, ""))
+                    return False
                 root["calls"] += 1
-                if samples and samples[0].finish_reason == "cancelled":
+                if resp.finish_reason == "cancelled":
                     return state.solved
-                best = None
-                for r2 in samples:
-                    solved, fb2, code2 = _evaluate(state, chain_id, rnd, r2.content, r2, f"repair{q+1}")
-                    if solved:
-                        return True
-                    if code2 is None or code2 == code:
-                        continue
-                    new_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code2)))
-                    if new_sorries > cur_sorries:
-                        continue
-                    if think_mod_len >= 100 and "unsolved goals" in fb2 and _model_code_len(problem, code2) < 0.6 * think_mod_len:
-                        continue  # reject non-solving repairs that gut the proof construction to reduce error count
-                    score = error_count(fb2)
-                    if score <= cur_score and (best is None or score < best[0]):
-                        best = (score, code2, fb2)
-                if best is None:
-                    break  # nothing new: go back to thinking
-                _, code, fb = best
-                last_assistant = "```lean\n" + code + "\n```"
-                if best[0] == 0:
-                    break
+                sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
+                if "```search" in resp.content and extract_candidate(problem, resp.content) is None and not stop():
+                    salvage_msgs = messages + [
+                        {"role": "assistant", "content": resp.content[-4000:]},
+                        {"role": "user", "content": (
+                            (sr + "\n\n" if sr else "") +
+                            ("<reasoning>\n" + resp.reasoning[-16000:] + "\n</reasoning>\n\n" if resp.reasoning else "") +
+                            "Stop searching. Write the complete Lean 4 proof immediately in one ```lean block "
+                            "(helpers + full theorem), proving any missing steps directly from definitions.")},
+                    ]
+                    try:
+                        with llm.trace_context(stage="think_search_salvage"):
+                            resp2 = llm.chat(salvage_msgs, max_tokens=int(cfg["repair_max_tokens"]), temperature=0.3,
+                                             thinking=False, prefill="```lean4\n", stop_check=stop, priority=prio() + 1)
+                        root["calls"] += 1
+                        if resp2.finish_reason == "cancelled":
+                            return state.solved
+                        resp = llm.LLMResponse(resp2.content, resp.reasoning,
+                                               resp.completion_tokens + resp2.completion_tokens,
+                                               resp2.finish_reason, resp.seconds + resp2.seconds,
+                                               reasoning_tokens=getattr(resp, "reasoning_tokens", 0) + getattr(resp2, "reasoning_tokens", 0))
+                        sr = ""
+                    except llm.LLMFailure:
+                        pass
+            solved, fb, code = _evaluate(state, chain_id, rnd, resp.content, resp, "think", prompt_messages=used_msgs)
+            if solved:
+                return True
+            if sr:
+                fb = (fb + "\n\n" + sr) if code is not None else sr
+            last_assistant = resp.content[-8000:] or "(no answer)"
+            # cheap non-thinking repairs of the concrete compiler errors, several samples per request
+            if code is not None:
+                think_mod_len = _model_code_len(problem, code)
+                for q in range(int(cfg["quick_repairs"])):
+                    if stop():
+                        return state.solved
+                    cur_score = error_count(fb)
+                    if cur_score == 0:
+                        break
+                    cur_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code)))
+                    repair_msgs = messages + [
+                        {"role": "assistant", "content": "```lean4\n" + code + "\n```"},
+                        {"role": "user", "content": "Lean rejected this code. Compiler output:\n\n" + fb +
+                         "\n\nRepair these specific errors while keeping the mathematical construction intact "
+                         "(do NOT replace nontrivial constructions with trivial stubs just to silence errors). "
+                         "Never keep a non-existent identifier: use a verified declaration from the hints "
+                         "(adapting subtype/bundled arguments if needed) or prove the step inline via `have ... := by ...`. "
+                         "Output the complete corrected code (helpers + full theorem) in one ```lean block, no explanation."},
+                    ]
+                    try:
+                        with llm.trace_context(stage=f"repair{q+1}"):
+                            samples = llm.chat_n(repair_msgs, int(cfg.get("repair_samples", 1)),
+                                                 max_tokens=int(cfg["repair_max_tokens"]), temperature=0.4 + 0.2 * q,
+                                                 prefill="```lean4\n", priority=prio() + 1, stop_check=stop)
+                    except llm.LLMFailure:
+                        break
+                    root["calls"] += 1
+                    if samples and samples[0].finish_reason == "cancelled":
+                        return state.solved
+                    best = None
+                    for r2 in samples:
+                        solved, fb2, code2 = _evaluate(state, chain_id, rnd, r2.content, r2, f"repair{q+1}",
+                                                       prompt_messages=repair_msgs)
+                        if solved:
+                            return True
+                        if code2 is None or code2 == code:
+                            continue
+                        new_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code2)))
+                        if new_sorries > cur_sorries:
+                            continue
+                        if think_mod_len >= 100 and "unsolved goals" in fb2 and _model_code_len(problem, code2) < 0.6 * think_mod_len:
+                            continue  # reject non-solving repairs that gut the proof construction to reduce error count
+                        score = error_count(fb2)
+                        if score <= cur_score and (best is None or score < best[0]):
+                            best = (score, code2, fb2)
+                    if best is None:
+                        break  # nothing new: go back to thinking
+                    _, code, fb = best
+                    last_assistant = "```lean\n" + code + "\n```"
+                    if best[0] == 0:
+                        break
         improved = before is None or (state.best_errors is not None and state.best_errors < before)
         with state.lock:
             state.stalled_rounds = 0 if improved else state.stalled_rounds + 1

@@ -276,8 +276,18 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/jobs/([\w]+)/proof\.lean", path)
             if m:
                 st = job_status(m.group(1), full=True)
+                safe = re.sub(r"[^\w.-]+", "_", st["name"], flags=re.ASCII).strip("_") or "proof"
                 return self._send(200, st["proof"].encode("utf-8"), "text/plain; charset=utf-8",
-                                  {"Content-Disposition": f'attachment; filename="{st["name"]}.lean"'})
+                                  {"Content-Disposition": f'attachment; filename="{safe}.lean"'})
+            m = re.fullmatch(r"/api/jobs/([\w]+)/dataset\.jsonl", path)
+            if m:
+                from .dataset import ALL_KINDS, export_jsonl_bytes
+                d = _job_dir(m.group(1))
+                meta = json.loads((d / "job.json").read_text(encoding="utf-8"))
+                safe = re.sub(r"[^\w.-]+", "_", meta.get("name", ""), flags=re.ASCII).strip("_") or "dataset"
+                payload = export_jsonl_bytes(d, kinds=set(ALL_KINDS), include_resumed=True)
+                return self._send(200, payload, "application/x-ndjson; charset=utf-8",
+                                  {"Content-Disposition": f'attachment; filename="{safe}_{m.group(1)}_dataset.jsonl"'})
             m = re.fullmatch(r"/api/formalize/(\w+)", path)
             if m and m.group(1) in _tasks:
                 return self._json(_tasks[m.group(1)])

@@ -222,6 +222,7 @@ re-read on every use, so it can be edited while a campaign runs. The main knobs:
 | `two_stage` | false | write an informal plan before formalizing (made things worse at our throughput) |
 | `fair_share_calls` | 3 | priority drops by 1 for every N model calls a problem has used |
 | `resume_previous` / `lemma_cache` | true / true | reuse attempts and lemmas from earlier runs |
+| `save_trajectories` | true | persist full prompt `messages` and `<think>` `reasoning` traces (`llm_calls.jsonl`, `attempts.jsonl`, `skeletons.jsonl`) for SFT/DPO/RL export via `python3 -m lemmata.dataset` |
 
 Environment variables (set them in `.env` or in the shell):
 

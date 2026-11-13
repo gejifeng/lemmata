@@ -230,7 +230,7 @@ def prune_unused(cand: Candidate) -> Candidate:
     """Drop helper declarations that neither the proof body nor another kept helper refers to.
     Declarations with attributes, instances and non-declaration chunks are always kept."""
     chunks = [c.strip() for c in _split_decls(cand.helpers) if c.strip()]
-    if len(chunks) <= 1:
+    if not chunks:
         return cand
     named = []
     for c in chunks:
@@ -278,6 +278,16 @@ def _clean_body(body: str) -> str:
     else:
         whole = first.strip() + ("\n" + rest if rest else "")
     return "\n".join("  " + l if l.strip() else l for l in whole.split("\n"))
+
+
+def candidate_block(problem: Problem, cand: Candidate) -> str:
+    """Render only the assistant-authored Lean block (solution defs, helpers, target theorem + proof),
+    without imports, surrounding context declarations, or `#print axioms`."""
+    parts = [cand.solutions[n] for n, _ in problem.solution_defs if n in cand.solutions]
+    if cand.helpers.strip():
+        parts.append(cand.helpers.strip())
+    parts.append(problem.statement + " by\n" + cand.body)
+    return "\n\n".join(parts)
 
 
 def render(problem: Problem, cand: Candidate, *, check_axioms: bool = True) -> tuple[str, int]:

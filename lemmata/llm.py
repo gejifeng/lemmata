@@ -9,6 +9,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -52,6 +53,72 @@ class use_model:
 
     def __exit__(self, *exc):
         _local.model = self.prev
+
+
+_trace_lock = threading.Lock()
+
+
+def current_trace() -> dict:
+    return dict(getattr(_local, "trace", None) or {})
+
+
+class trace_context:
+    """Scoped metadata (`dir`, `problem`, `depth`, `stage`, `chain`, `round`, `enabled`) attached to all LLM calls
+    on the current thread so every raw request/response (including `<think>` reasoning) is persisted losslessly."""
+
+    def __init__(self, **fields):
+        self.fields = {k: v for k, v in fields.items() if v is not None}
+
+    def __enter__(self):
+        self.prev = getattr(_local, "trace", None)
+        merged = dict(self.prev or {})
+        merged.update(self.fields)
+        _local.trace = merged
+        return merged
+
+    def __exit__(self, *exc):
+        _local.trace = self.prev
+
+
+def _record_trace(*, messages: list[dict], model: str, thinking: bool, temperature: float,
+                  prefill: str | None, resp: LLMResponse, sample_index: int = 0) -> None:
+    ctx = getattr(_local, "trace", None)
+    if not ctx or not ctx.get("enabled", True) or not ctx.get("dir"):
+        return
+    if resp.finish_reason == "cancelled" and not resp.content and not resp.reasoning:
+        return
+    out_dir = Path(ctx["dir"])
+    row = {
+        "ts": time.time(),
+        "problem": ctx.get("problem", ""),
+        "depth": ctx.get("depth", 0),
+        "stage": ctx.get("stage", ""),
+        "substage": ctx.get("substage", ""),
+        "chain": ctx.get("chain"),
+        "round": ctx.get("round"),
+        "sample_index": sample_index,
+        "model": model,
+        "thinking": thinking,
+        "temperature": temperature,
+        "prefill": prefill,
+        "messages": [
+            {**{"role": m.get("role", ""), "content": m.get("content", "")},
+             **({"reasoning_content": m["reasoning_content"]} if m.get("reasoning_content") else {})}
+            for m in messages
+        ],
+        "reasoning": resp.reasoning,
+        "content": resp.content,
+        "completion_tokens": resp.completion_tokens,
+        "reasoning_tokens": resp.reasoning_tokens,
+        "finish_reason": resp.finish_reason,
+        "seconds": round(resp.seconds, 3),
+    }
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with _trace_lock, (out_dir / "llm_calls.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _headers(s: dict) -> dict:
@@ -179,12 +246,29 @@ class LLMResponse:
     completion_tokens: int
     finish_reason: str | None
     seconds: float
+    reasoning_tokens: int = 0
 
 
 REPEAT_LINES = 12  # this many recent non-empty lines with at most 2 distinct values = a degenerate loop
 
 
 SPECIAL_TOKENS = re.compile(r"<｜(?:begin|end)▁of▁sentence｜>")
+INLINE_THINK_RE = re.compile(r"^\s*<think>(.*?)</think>\s*(.*)", re.S)
+
+
+def _split_inline_think(raw_content: str, raw_reasoning: str) -> tuple[str, str]:
+    """Support both servers with dedicated `reasoning_content` streams and servers that emit `<think>...</think>`
+    inline inside `content`."""
+    raw_content = SPECIAL_TOKENS.sub("", raw_content)
+    raw_reasoning = SPECIAL_TOKENS.sub("", raw_reasoning)
+    if raw_reasoning:
+        return raw_content, raw_reasoning
+    m = INLINE_THINK_RE.match(raw_content)
+    if m:
+        return m.group(2), m.group(1).strip()
+    if raw_content.lstrip().startswith("<think>") and "</think>" not in raw_content:
+        return "", re.sub(r"^\s*<think>\s*", "", raw_content)
+    return raw_content, raw_reasoning
 
 
 def _apply_prefill(prefill: str | None, text: str) -> str:
@@ -299,8 +383,12 @@ def _chat_once(messages, *, max_tokens, temperature, thinking, total_timeout, st
         STATS["completion_tokens"] += ctoks
         STATS["reasoning_tokens"] += rtoks
         STATS["seconds"] += secs
-    text = _apply_prefill(prefill, "".join(content))
-    return LLMResponse(text, "".join(reasoning), ctoks, finish, secs)
+    raw_c, raw_r = _split_inline_think("".join(content), "".join(reasoning))
+    text = _apply_prefill(prefill, raw_c)
+    res = LLMResponse(text, raw_r, ctoks, finish, secs, reasoning_tokens=rtoks)
+    _record_trace(messages=messages, model=s["model"], thinking=thinking, temperature=temperature,
+                  prefill=prefill, resp=res)
+    return res
 
 
 def chat_salvage(messages: list[dict], *, max_tokens: int = 32000, temperature: float = 0.8,
@@ -308,7 +396,8 @@ def chat_salvage(messages: list[dict], *, max_tokens: int = 32000, temperature: 
                  prefill: str | None = "```lean4\n", priority: int = 0) -> LLMResponse:
     """Thinking call; if the budget is exhausted while still thinking, ask a non-thinking follow-up
     to turn the partial reasoning into a final answer."""
-    resp = chat(messages, max_tokens=max_tokens, temperature=temperature, stop_check=stop_check, priority=priority)
+    with trace_context(substage="think"):
+        resp = chat(messages, max_tokens=max_tokens, temperature=temperature, stop_check=stop_check, priority=priority)
     if resp.finish_reason == "cancelled":
         return resp
     if "```" in resp.content and resp.finish_reason != "length":
@@ -323,10 +412,12 @@ def chat_salvage(messages: list[dict], *, max_tokens: int = 32000, temperature: 
                     "\n\nNow stop deliberating and write the final answer immediately, based on the reasoning above. "
                     + final_instruction),
     }]
-    resp2 = chat(follow, max_tokens=answer_tokens, temperature=0.3, thinking=False, stop_check=stop_check,
-                 prefill=prefill, priority=priority + 1)
+    with trace_context(substage="salvage"):
+        resp2 = chat(follow, max_tokens=answer_tokens, temperature=0.3, thinking=False, stop_check=stop_check,
+                     prefill=prefill, priority=priority + 1)
     return LLMResponse(resp2.content, resp.reasoning, resp.completion_tokens + resp2.completion_tokens,
-                       resp2.finish_reason, resp.seconds + resp2.seconds)
+                       resp2.finish_reason, resp.seconds + resp2.seconds,
+                       reasoning_tokens=resp.reasoning_tokens + resp2.reasoning_tokens)
 
 
 def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature: float = 0.6,
@@ -337,10 +428,11 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
                      prefill=prefill, priority=priority, stop_check=stop_check)]
     s = settings()
     model = s["model"]
+    parent_trace = current_trace()
 
     def _parallel() -> list[LLMResponse]:
-        def one(_):
-            with use_model(model):
+        def one(idx: int):
+            with use_model(model), trace_context(**parent_trace):
                 return chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
                             prefill=prefill, priority=priority, stop_check=stop_check)
         with ThreadPoolExecutor(max_workers=n) as ex:
@@ -387,7 +479,13 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
         STATS["seconds"] += secs
     out = []
     choices = sorted(d.get("choices") or [], key=lambda c: c.get("index", 0))
-    for ch in choices:
-        text = _apply_prefill(prefill, (ch.get("message") or {}).get("content") or "")
-        out.append(LLMResponse(text, "", ctoks // max(1, len(choices)), ch.get("finish_reason"), secs))
+    for idx, ch in enumerate(choices):
+        msg = ch.get("message") or {}
+        raw_r = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        raw_c, raw_r = _split_inline_think(msg.get("content") or "", raw_r)
+        text = _apply_prefill(prefill, raw_c)
+        r_item = LLMResponse(text, raw_r, ctoks // max(1, len(choices)), ch.get("finish_reason"), secs)
+        _record_trace(messages=messages, model=s["model"], thinking=False, temperature=temperature,
+                      prefill=prefill, resp=r_item, sample_index=idx)
+        out.append(r_item)
     return out
