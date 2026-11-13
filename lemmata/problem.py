@@ -127,7 +127,8 @@ class Candidate:
     solutions: dict[str, str]  # solution name -> full replacement definition
 
 
-CODE_BLOCK = re.compile(r"```(?:lean4?|Lean4?)?[^\n]*\n(.*?)```", re.S)
+CODE_BLOCK = re.compile(r"```(?:lean4?|Lean4?)?[ \t]*\n(.*?)```", re.S)
+FENCED_BLOCK = re.compile(r"```([^\n]*)\n(.*?)```", re.S)
 
 
 TOP_LEVEL_DECL = re.compile(r"(?m)^(?:import|theorem|lemma|def|abbrev|example|namespace|section|noncomputable|open)\b")
@@ -140,8 +141,14 @@ def close_fences(response: str) -> str:
     return response
 
 
+def lean_blocks(response: str) -> list[str]:
+    """Extract fenced code blocks tagged as Lean (or untagged), ignoring ```search, ```text, etc."""
+    return [b for tag, b in FENCED_BLOCK.findall(close_fences(response))
+            if tag.strip().lower() in ("", "lean", "lean4")]
+
+
 def extract_candidate(problem: Problem, response: str) -> Candidate | None:
-    blocks = [re.sub(r"^4[ \t]*\n", "", b) for b in CODE_BLOCK.findall(close_fences(response))]
+    blocks = lean_blocks(response)
     if not blocks:
         return None
     # prefer the last block that contains the theorem

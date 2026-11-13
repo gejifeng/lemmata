@@ -112,7 +112,7 @@ Mathlib，建立名字索引，询问 API Key，在应用菜单里添加 `Lemmat
 
 ```
 题目 ──▶ 自动化层 ──▶ 直接证明 ─────停滞──▶ 拆分 ──────────▶ 每个引理：走同样的流程（递归）
-         (不调用模型)   thinking → 编译 →     带 `sorry` 引理     (深度 ≤ 3；引理缓存；
+         (不调用模型)   thinking → 编译 →     带 `sorry` 引理     (深度 ≤ 8；引理缓存；
                         便宜的修复            的骨架              假引理尽早剔除)
 ```
 
@@ -203,6 +203,7 @@ python3 -m lemmata.selftest
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
+| `max_depth` | 8 | 最大递归拆分深度（可通过 `--max-depth` 或网页界面覆盖） |
 | `stall_rounds` | 2 | 编译错误数连续多少轮 thinking 没有减少就开始拆分 |
 | `race_top` | false | 一开始就让拆分与直接证明并行（`--resume-from` 提供了骨架时总是开启） |
 | `quick_repairs` / `repair_samples` | 4 / 2 | 每次 thinking 尝试之后的非 thinking 修复请求数，以及每次请求的采样数 |

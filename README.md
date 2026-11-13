@@ -118,7 +118,7 @@ What these runs showed:
 
 ```
 problem ──▶ automation ──▶ direct attempts ──stall──▶ decomposition ──▶ each lemma: same pipeline (recursive)
-            (no model)     think → compile →         skeleton with       (depth ≤ 3; lemma cache;
+            (no model)     think → compile →         skeleton with       (depth ≤ 8; lemma cache;
                            cheap repairs             `sorry` lemmas      false lemmas rejected early)
 ```
 
@@ -213,6 +213,7 @@ re-read on every use, so it can be edited while a campaign runs. The main knobs:
 
 | Key | Default | Meaning |
 |---|---|---|
+| `max_depth` | 8 | maximum recursive decomposition depth (overridable via `--max-depth` or the web UI) |
 | `stall_rounds` | 2 | thinking rounds without fewer compiler errors before decomposing |
 | `race_top` | false | decompose in parallel with direct attempts from the start (always on when `--resume-from` provides a skeleton) |
 | `quick_repairs` / `repair_samples` | 4 / 2 | non-thinking repair requests after each thinking attempt, and samples per request |

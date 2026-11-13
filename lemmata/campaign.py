@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import llm
+from .agent import runtime_config
 from .benchmarks import SETS
 from .decompose import solve
 from .paths import RUNS_DIR
@@ -31,7 +32,8 @@ def main() -> None:
     ap.add_argument("--hours", type=float, default=6.0, help="wall-clock budget for the whole campaign")
     ap.add_argument("--chains", type=int, default=1, help="parallel direct-proof chains per (sub)problem")
     ap.add_argument("--rounds", type=int, default=6, help="thinking rounds per chain")
-    ap.add_argument("--max-depth", type=int, default=3, help="maximum decomposition depth")
+    ap.add_argument("--max-depth", type=int, default=None,
+                    help="maximum decomposition depth (default: max_depth in config/default.json, 8)")
     ap.add_argument("--sketches", type=int, default=3, help="decomposition attempts per (sub)problem")
     ap.add_argument("--resume-from", default="",
                     help="comma-separated earlier runs whose valid top-level skeletons are reused")
@@ -67,6 +69,9 @@ def main() -> None:
             with (out / "events.log").open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
 
+    max_depth = max(0, args.max_depth if args.max_depth is not None else int(runtime_config().get("max_depth", 8)))
+    log(f"config: hours={args.hours:g} max_depth={max_depth} chains={args.chains} rounds={args.rounds} sketches={args.sketches}")
+
     results: dict[str, bool] = {}
 
     def work(prob) -> None:
@@ -79,8 +84,9 @@ def main() -> None:
                     if row.get("ok"):
                         seeds.append(row["content"])
         try:
-            cand = solve(prob, out / name, 0, chains=args.chains, rounds=args.rounds, max_depth=args.max_depth,
-                         sketches=args.sketches + len(seeds), deadline=deadline, log=log, seed_skeletons=seeds)
+            cand = solve(prob, out / name, 0, chains=args.chains, rounds=args.rounds, max_depth=max_depth,
+                         sketches=args.sketches + len(seeds), deadline=deadline, log=log,
+                         seed_skeletons=seeds if seeds else None)
         except Exception as exc:  # keep the campaign alive
             log(f"{name}: crashed {exc!r}")
             cand = None

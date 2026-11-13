@@ -41,6 +41,9 @@ def _problem_for(dir_: Path) -> Problem | None:
     return None
 
 
+PARSE_ABORT = re.compile(r"expected command|unexpected token [^\n]*expected '\{' or tactic")
+
+
 def _build() -> dict[str, list[dict]]:
     idx: dict[str, list[dict]] = {}
     for f in RUNS.glob("*/**/attempts.jsonl"):
@@ -55,10 +58,14 @@ def _build() -> dict[str, list[dict]]:
                 continue
             if r.get("solved") or not r.get("code") or not r.get("feedback"):
                 continue
-            if "forbidden" in r.get("verdict_reason", "") or "no code" in r.get("verdict_reason", ""):
+            reason = r.get("verdict_reason", "")
+            if "compile errors" not in reason or PARSE_ABORT.search(r["feedback"]):
+                continue
+            errs = error_count(r["feedback"])
+            if errs <= 0:
                 continue
             idx.setdefault(k, []).append({"code": r["code"], "feedback": r["feedback"],
-                                           "errors": error_count(r["feedback"]), "src": str(f)})
+                                           "errors": errs, "src": str(f)})
     return idx
 
 

@@ -80,6 +80,9 @@ def harvest(problem: Problem, cand: Candidate):
         text = _sanitize(re.sub(r"^theorem \S+", f"theorem {name}", m.text.strip(), count=1))
         text = re.sub(r":=\s*sorry\s*$", ":=", text)
         lemmas.append((name, text))
+    from .decompose import _conclusion
+    if len(lemmas) == 1 and _conclusion(lemmas[0][1]) == _conclusion(problem.statement):
+        return None
     it = iter(lemmas)
     order: list[tuple[str, str]] = []
     out_chunks: list[str] = []

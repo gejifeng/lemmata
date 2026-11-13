@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import dotenv, llm
+from .agent import runtime_config
 from .formalize import formalize
 from .lean import ELAN_BIN
 from .paths import NAMES_FILE, ROOT, RUNS_DIR
@@ -35,6 +36,7 @@ from .problem import check_statement, parse_lean_problem
 WEB_DIR = Path(__file__).resolve().parent / "web"
 JOB_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{4}$")
 MAX_HOURS = 24.0
+MAX_DEPTH_CAP = 20
 
 _procs: dict[str, subprocess.Popen] = {}
 _tasks: dict[str, dict] = {}  # formalization requests
@@ -54,7 +56,8 @@ def public_settings() -> dict:
     key = s["api_key"]
     return {"base_url": s["base_url"], "model": s["model"], "style": s["style"], "has_key": bool(key),
             "key_hint": (key[:3] + "…" + key[-4:]) if len(key) > 10 else ("set" if key else ""),
-            "models": llm.DEEPSEEK_MODELS, "styles": list(llm.API_STYLES)}
+            "models": llm.DEEPSEEK_MODELS, "styles": list(llm.API_STYLES),
+            "max_depth": int(runtime_config().get("max_depth", 8))}
 
 
 def save_settings(body: dict) -> dict:
@@ -108,23 +111,26 @@ def _job_dir(jid: str) -> Path:
     return d
 
 
-def start_job(lean: str, informal: str, model: str | None, hours: float) -> dict:
+def start_job(lean: str, informal: str, model: str | None, hours: float, max_depth: int | None = None) -> dict:
     problem = parse_lean_problem(lean, informal=informal)
     ok, errors = check_statement(problem)
     if not ok:
         raise ValueError("the statement does not compile:\n" + errors)
     hours = max(0.05, min(MAX_HOURS, float(hours)))
+    if max_depth is None:
+        max_depth = int(runtime_config().get("max_depth", 8))
+    max_depth = max(0, min(MAX_DEPTH_CAP, int(max_depth)))
     jid = time.strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
     d = RUNS_DIR / f"web_{jid}"
     d.mkdir(parents=True)
     (d / "problem.lean").write_text(problem.header + "\n\n" + problem.display() + "\n", encoding="utf-8")
     model = model or llm.settings()["model"]
-    meta = {"id": jid, "name": problem.name, "model": model, "hours": hours, "informal": informal,
-            "statement": problem.statement, "created": time.time()}
+    meta = {"id": jid, "name": problem.name, "model": model, "hours": hours, "max_depth": max_depth,
+            "informal": informal, "statement": problem.statement, "created": time.time()}
     (d / "job.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     env = dict(os.environ, LEMMATA_MODEL=model, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     cmd = [sys.executable, "-m", "lemmata.campaign", str(d / "problem.lean"), "--run", d.name,
-           "--hours", f"{hours:g}"]
+           "--hours", f"{hours:g}", "--max-depth", str(max_depth)]
     kw: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
     with (d / "stdout.log").open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT, **kw)
@@ -197,7 +203,7 @@ def job_status(jid: str, *, full: bool = False) -> dict:
         state = "interrupted"  # the server was restarted while this job ran
     llm_stats = stats.get("llm") or {}
     out = {"id": jid, "name": meta["name"], "model": meta.get("model", ""), "hours": meta.get("hours"),
-           "created": meta.get("created"), "state": state,
+           "max_depth": meta.get("max_depth"), "created": meta.get("created"), "state": state,
            "elapsed_s": stats.get("wall_s") or (time.time() - meta["created"] if running else None),
            "tokens": llm_stats.get("completion_tokens", 0), "calls": llm_stats.get("calls", 0)}
     if full:
@@ -309,7 +315,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": ok, "name": problem.name, "errors": errors})
             if path == "/api/prove":
                 return self._json(start_job(body.get("lean", ""), body.get("informal", ""), body.get("model"),
-                                            body.get("hours", 1)))
+                                            body.get("hours", 1), body.get("max_depth")))
             m = re.fullmatch(r"/api/jobs/([\w]+)/stop", path)
             if m:
                 return self._json(stop_job(m.group(1)))

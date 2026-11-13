@@ -13,7 +13,7 @@ import re
 import sys
 
 from . import llm
-from .problem import CODE_BLOCK, close_fences, check_statement, parse_lean_problem
+from .problem import check_statement, lean_blocks, parse_lean_problem
 
 SYSTEM = "You are an expert in Lean 4 and Mathlib who translates mathematics into faithful formal statements."
 
@@ -59,9 +59,8 @@ def _language(text: str) -> str:
 
 
 def _extract(reply: str) -> tuple[str, str]:
-    blocks = CODE_BLOCK.findall(close_fences(reply))
-    code = next((b for b in reversed(blocks) if "theorem" in b), blocks[-1] if blocks else "")
-    code = re.sub(r"^4[ \t]*\n", "", code).strip()
+    blocks = lean_blocks(reply)
+    code = next((b for b in reversed(blocks) if "theorem" in b), blocks[-1] if blocks else "").strip()
     notes_m = re.search(r"NOTES:\s*(.*)", reply, re.S)
     notes = notes_m.group(1).strip() if notes_m else ""
     if notes.lower().rstrip(".") == "none":

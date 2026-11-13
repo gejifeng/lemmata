@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import llm
+from .history import error_count
 from .problem import Candidate, Problem, Verdict, check, extract_candidate, format_feedback, prune_unused, render
 
 SYSTEM = """\
@@ -127,18 +129,19 @@ from .paths import CONFIG_FILE
 
 
 DEFAULT_CONFIG = {
+    "max_depth": 8,               # maximum recursive decomposition depth
     "stall_rounds": 2,            # think rounds without fewer errors before decomposing
     "race_top": False,            # run decomposition in parallel with direct attempts at the top level
     "parallel_sketches": 1,       # decomposition workers at the top level
     "quick_repairs": 4,           # non-thinking repair requests after each thinking attempt
     "repair_samples": 2,          # samples per repair request (vLLM `n`)
-    "think_max_tokens": 14000,
-    "repair_max_tokens": 6000,
+    "think_max_tokens": 20000,
+    "repair_max_tokens": 12000,
     "search": True,               # LeanSearch/Loogle premise retrieval
     "two_stage": False,           # write an informal plan before formalizing (costly; off by default)
     "two_stage_max_depth": 1,
-    "plan_max_tokens": 14000,
-    "formalize_max_tokens": 10000,
+    "plan_max_tokens": 24000,
+    "formalize_max_tokens": 20000,
     "fair_share_calls": 3,        # priority drops by 1 for every N model calls a top-level problem has used
     "depth_weight": 2,            # priority bonus per decomposition level
     "resume_previous": True,      # start from the best earlier attempt on the same statement
@@ -193,21 +196,23 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
             from .problem import split_full_code
             _, start = render(problem, cand)
             out = try_autopatch(verdict.code, verdict.result.errors, start)
-            if out is not None and out[1].ok:
+            if out is not None and (out[1].ok or len(out[1].errors) < len(verdict.result.errors)):
                 patched_cand = split_full_code(problem, out[0].split("#print axioms")[0])
                 if patched_cand is not None:
                     v2 = check(problem, patched_cand)
-                    if v2.solved:
+                    if v2.solved or len(v2.result.errors) < len(verdict.result.errors):
                         cand, verdict = patched_cand, v2
                         mode = mode + "+autopatch"
         except Exception:
             pass
+    bare_sorry = not cand.helpers.strip() and re.sub(r"--[^\n]*", "", cand.body).strip() == "sorry"
     fb = "" if verdict.solved else format_feedback(verdict.code, verdict)
     if not verdict.solved:
-        state.note_errors(len(verdict.result.errors) + (1 if "sorry" in verdict.reason else 0))
+        if not bare_sorry:
+            state.note_errors(len(verdict.result.errors) + (1 if "sorry" in verdict.reason else 0))
         if runtime_config().get("search"):
             fb += error_search(verdict)
-    if not verdict.solved and "sorry" in verdict.reason and verdict.result.ok:
+    if not verdict.solved and not bare_sorry and "sorry" in verdict.reason and verdict.result.ok:
         try:
             from .harvest import harvest
             h = harvest(problem, cand)
@@ -231,20 +236,27 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
     return verdict.solved, fb, shown
 
 
+_ERR_IDENT_PATTERNS = [
+    re.compile(r"[Uu]nknown (?:identifier|constant) [`'«]?([\w.'₀-₉]+)"),
+    re.compile(r"[Tt]he environment does not contain [`'«]?([\w.'₀-₉]+)"),
+]
+
+
 def error_search(verdict: Verdict) -> str:
     """For unknown identifiers, search Mathlib by the intent encoded in the (wrong) name."""
-    import re
     from . import search
     idents = []
     for m in verdict.result.errors:
-        for g in re.findall(r"Unknown (?:identifier|constant) [`'«]?([\w.'₀-₉]+)", m.text):
-            if ("." in g or "_" in g) and g not in idents:
-                idents.append(g)
+        for pat in _ERR_IDENT_PATTERNS:
+            for g in pat.findall(m.text):
+                if ("." in g or "_" in g or re.search(r"[a-z0-9][A-Z]", g)) and g not in idents:
+                    idents.append(g)
     if not idents:
         return ""
     queries = []
     for g in idents[:3]:
-        words = re.sub(r"[._]", " ", g)
+        words = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", g)
+        words = re.sub(r"[._]+", " ", words)
         queries.append(words)
     try:
         prems = search.search(queries, k=4, limit=8)
@@ -252,6 +264,14 @@ def error_search(verdict: Verdict) -> str:
         return ""
     txt = search.render_premises(prems, "Mathlib search for the intent of the unknown names (verified to exist):")
     return ("\n\n" + txt) if txt else ""
+
+
+def _model_code_len(problem: Problem, shown: str) -> int:
+    """Non-whitespace character count of the model-written helpers + proof body in `shown`."""
+    _, start = render(problem, Candidate("", "", {}), check_axioms=False)
+    fixed = len(re.sub(r"\s+", "", (problem.docstring or "") + problem.statement + "by"))
+    tail = "\n".join(shown.splitlines()[max(0, start - 1):])
+    return max(0, len(re.sub(r"\s+", "", tail)) - fixed)
 
 
 PLAN_PROMPT = """Here is a theorem to be proved in Lean 4 with Mathlib.
@@ -342,16 +362,12 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
         # fair share: top-level problems that already used many calls yield to untouched ones
         return priority - min(state.stalled_rounds, 3) - root["calls"] // int(cfg.get("fair_share_calls", 1))
 
-    search_results = ""
     for rnd in range(1, rounds + 1):
         if stop():
             return state.solved
         cfg = runtime_config()
         before = state.best_errors
         think_budget = int(cfg["formalize_max_tokens"] if state.plan else cfg["think_max_tokens"])
-        if search_results:
-            messages.append({"role": "user", "content": search_results + "\n\nNow write the proof."})
-            search_results = ""
         try:
             resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
                                     final_instruction="Output exactly one ```lean block with helper lemmas and the full theorem with proof.",
@@ -363,6 +379,49 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
         if resp.finish_reason == "cancelled":
             return state.solved
         sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
+        if (sr or "```search" in resp.content) and extract_candidate(problem, resp.content) is None:
+            search_reply = sr or "Search is disabled or returned nothing usable."
+            messages.append({"role": "assistant", "content": resp.content[-8000:] or "(search)"})
+            messages.append({"role": "user", "content": (
+                search_reply + "\n\nDo NOT output another ```search block. If the exact lemma you wanted is not "
+                "listed above, prove the step directly from definitions or as an explicit `have ... := by` helper. "
+                "Now write the complete proof in one ```lean block (helpers + full theorem).")})
+            if len(messages) > 8:
+                messages = messages[:2] + messages[-6:]
+            if stop():
+                return state.solved
+            try:
+                resp = llm.chat_salvage(messages, max_tokens=think_budget, temperature=temperature,
+                                        final_instruction="Output ONLY one ```lean block with helper lemmas and the full theorem with proof (no ```search).",
+                                        stop_check=stop, priority=prio())
+            except llm.LLMFailure as exc:
+                state.record(Attempt(chain_id, rnd, f"llm failure: {exc}", False, "", 0, 0.0, ""))
+                return False
+            root["calls"] += 1
+            if resp.finish_reason == "cancelled":
+                return state.solved
+            sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
+            if "```search" in resp.content and extract_candidate(problem, resp.content) is None and not stop():
+                salvage_msgs = messages + [
+                    {"role": "assistant", "content": resp.content[-4000:]},
+                    {"role": "user", "content": (
+                        (sr + "\n\n" if sr else "") +
+                        ("<reasoning>\n" + resp.reasoning[-16000:] + "\n</reasoning>\n\n" if resp.reasoning else "") +
+                        "Stop searching. Write the complete Lean 4 proof immediately in one ```lean block "
+                        "(helpers + full theorem), proving any missing steps directly from definitions.")},
+                ]
+                try:
+                    resp2 = llm.chat(salvage_msgs, max_tokens=int(cfg["repair_max_tokens"]), temperature=0.3,
+                                     thinking=False, prefill="```lean4\n", stop_check=stop, priority=prio() + 1)
+                    root["calls"] += 1
+                    if resp2.finish_reason == "cancelled":
+                        return state.solved
+                    resp = llm.LLMResponse(resp2.content, resp.reasoning,
+                                           resp.completion_tokens + resp2.completion_tokens,
+                                           resp2.finish_reason, resp.seconds + resp2.seconds)
+                    sr = ""
+                except llm.LLMFailure:
+                    pass
         solved, fb, code = _evaluate(state, chain_id, rnd, resp.content, resp, "think")
         if solved:
             return True
@@ -371,14 +430,22 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
         last_assistant = resp.content[-8000:] or "(no answer)"
         # cheap non-thinking repairs of the concrete compiler errors, several samples per request
         if code is not None:
+            think_mod_len = _model_code_len(problem, code)
             for q in range(int(cfg["quick_repairs"])):
                 if stop():
                     return state.solved
+                cur_score = error_count(fb)
+                if cur_score == 0:
+                    break
+                cur_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code)))
                 repair_msgs = messages + [
                     {"role": "assistant", "content": "```lean4\n" + code + "\n```"},
                     {"role": "user", "content": "Lean rejected this code. Compiler output:\n\n" + fb +
-                     "\n\nRepair these specific errors with minimal changes. Output the complete corrected code "
-                     "(helpers + full theorem) in one ```lean block, no explanation."},
+                     "\n\nRepair these specific errors while keeping the mathematical construction intact "
+                     "(do NOT replace nontrivial constructions with trivial stubs just to silence errors). "
+                     "Never keep a non-existent identifier: use a verified declaration from the hints "
+                     "(adapting subtype/bundled arguments if needed) or prove the step inline via `have ... := by ...`. "
+                     "Output the complete corrected code (helpers + full theorem) in one ```lean block, no explanation."},
                 ]
                 try:
                     samples = llm.chat_n(repair_msgs, int(cfg.get("repair_samples", 1)),
@@ -396,14 +463,20 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
                         return True
                     if code2 is None or code2 == code:
                         continue
-                    from .history import error_count
+                    new_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code2)))
+                    if new_sorries > cur_sorries:
+                        continue
+                    if think_mod_len >= 100 and "unsolved goals" in fb2 and _model_code_len(problem, code2) < 0.6 * think_mod_len:
+                        continue  # reject non-solving repairs that gut the proof construction to reduce error count
                     score = error_count(fb2)
-                    if best is None or score < best[0]:
+                    if score <= cur_score and (best is None or score < best[0]):
                         best = (score, code2, fb2)
                 if best is None:
                     break  # nothing new: go back to thinking
                 _, code, fb = best
                 last_assistant = "```lean\n" + code + "\n```"
+                if best[0] == 0:
+                    break
         improved = before is None or (state.best_errors is not None and state.best_errors < before)
         with state.lock:
             state.stalled_rounds = 0 if improved else state.stalled_rounds + 1

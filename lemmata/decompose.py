@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import llm
 from .agent import SYSTEM, ProblemState, run_chain
-from .problem import Candidate, Problem, _split_decls, check, extract_candidate, format_feedback, render
+from .problem import Candidate, Problem, _split_decls, check, extract_candidate, format_feedback, prune_unused, render
 from .lean import compile_lean
 
 SKETCH_SYSTEM = SYSTEM.replace(
@@ -52,10 +52,9 @@ class Skeleton:
 LEMMA_RE = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:private\s+)?(theorem|lemma)\s+([^\s(:{\[]+)(.*?):=\s*(?:by\s*)?(?:\n\s*)?sorry\s*$", re.S)
 
 
-def parse_skeleton(problem: Problem, response: str) -> Skeleton | None:
-    cand = extract_candidate(problem, response)
-    if cand is None:
-        return None
+def _build_skeleton(cand: Candidate, prose: str) -> Skeleton:
+    if not re.search(r"\bsorry\b", re.sub(r"--[^\n]*", "", cand.body)):
+        cand = prune_unused(cand)
     context, lemmas, order = [], [], []
     for chunk in _split_decls(cand.helpers):
         s = chunk.strip()
@@ -72,8 +71,15 @@ def parse_skeleton(problem: Problem, response: str) -> Skeleton | None:
         else:
             context.append(s)
             order.append(("decl", s))
-    prose = CODE_BLOCK_STRIP.sub("", response).strip()
     return Skeleton(cand, context, lemmas, order, prose[-4000:])
+
+
+def parse_skeleton(problem: Problem, response: str) -> Skeleton | None:
+    cand = extract_candidate(problem, response)
+    if cand is None:
+        return None
+    prose = CODE_BLOCK_STRIP.sub("", response).strip()
+    return _build_skeleton(cand, prose)
 
 
 CODE_BLOCK_STRIP = re.compile(r"```.*?```", re.S)
@@ -109,8 +115,7 @@ def absorb_body_sorries(problem: Problem, sk: Skeleton) -> Skeleton | None:
     hskel, hlemmas, horder = h
     cand = Candidate("\n\n".join(t for t in [helpers_text, hskel.helpers] if t), hskel.body,
                      dict(sk.candidate.solutions))
-    return Skeleton(cand, list(sk.context_decls), list(sk.lemmas) + hlemmas,
-                    list(sk.order) + [("lemma", n) for n, _ in hlemmas], sk.prose)
+    return _build_skeleton(cand, sk.prose)
 
 
 def _conclusion(stmt: str) -> str:
@@ -128,7 +133,47 @@ def _conclusion(stmt: str) -> str:
     return t[cut + 1:].strip() if cut >= 0 else t
 
 
-def validate_skeleton(problem: Problem, sk: Skeleton) -> str | None:
+def _stmt_prop(stmt: str) -> str:
+    """Normalized binder+type signature of a theorem/lemma declaration, independent of its name."""
+    s = re.sub(r"^(?:--[^\n]*\n|/--.*?-/\s*)+", "", stmt.strip(), flags=re.S).strip()
+    s = re.sub(r"^(?:@\[[^\]]*\]\s*)?(?:private\s+|protected\s+)?(?:theorem|lemma)\s+[^\s(:{\[]+\s*", "", s)
+    s = re.sub(r":=\s*(?:by\b.*)?$", "", s, flags=re.S)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _context_props(ctx: str) -> set[str]:
+    out: set[str] = set()
+    for chunk in _split_decls(ctx):
+        core = re.sub(r"^(?:--[^\n]*\n|/--.*?-/\s*)+", "", chunk.strip(), flags=re.S).strip()
+        if re.match(r"^(?:@\[[^\]]*\]\s*)?(?:private\s+|protected\s+)?(?:theorem|lemma)\s+", core):
+            out.add(_stmt_prop(core))
+    return out
+
+
+def _check_skeleton_structure(problem: Problem, sk: Skeleton, ancestors: frozenset[str] = frozenset()) -> str | None:
+    """Fast structural and non-circularity checks before invoking Lean."""
+    if len(sk.lemmas) == 1 and _conclusion(sk.lemmas[0][1]) == _conclusion(problem.statement):
+        return ("This skeleton just restates the theorem as a single lemma and applies it; that is not a "
+                "decomposition. Split the proof into at least two genuinely smaller, separately provable steps "
+                "and do the combining work in the main proof.")
+    active_goals = set(ancestors) | {_stmt_prop(problem.statement)}
+    ctx_props = _context_props(problem.context)
+    for lname, lstmt in sk.lemmas:
+        lp = _stmt_prop(lstmt)
+        if lp in active_goals:
+            return (f"Helper lemma `{lname}` has the exact same statement as `{problem.name}` (or an ancestor goal "
+                    "already being proved), creating a circular decomposition. Split the proof into genuinely "
+                    "smaller intermediate steps and do the combining work in the main proof.")
+        if lp in ctx_props:
+            return (f"Helper lemma `{lname}` merely restates a theorem that is ALREADY available above "
+                    f"`{problem.name}` in the file; use that existing declaration directly instead of re-proving it.")
+    for d in sk.context_decls:
+        if re.search(r"\bsorry\b", re.sub(r"--[^\n]*", "", d)):
+            return "Only helper lemma proofs (`theorem ... := by sorry`) may contain sorry; found sorry in:\n" + d[:500]
+    return None
+
+
+def validate_skeleton(problem: Problem, sk: Skeleton, ancestors: frozenset[str] = frozenset()) -> str | None:
     """Return None if OK, else feedback. Skeletons whose main proof still has `sorry` are handled by the caller
     (absorb_body_sorries) before this is called."""
     if re.search(r"\bsorry\b", re.sub(r"--[^\n]*", "", sk.candidate.body)):
@@ -140,13 +185,9 @@ def validate_skeleton(problem: Problem, sk: Skeleton) -> str | None:
             return None  # a complete proof: accept as a lemma-free skeleton
         return ("No helper lemmas of the form `theorem name ... := by sorry` were found, and as a complete proof it fails:\n\n"
                 + format_feedback(v.code, v))
-    if len(sk.lemmas) == 1 and _conclusion(sk.lemmas[0][1]) == _conclusion(problem.statement):
-            return ("This skeleton just restates the theorem as a single lemma and applies it; that is not a "
-                    "decomposition. Split the proof into at least two genuinely smaller, separately provable steps "
-                    "and do the combining work in the main proof.")
-    for d in sk.context_decls:
-        if re.search(r"\bsorry\b", re.sub(r"--[^\n]*", "", d)):
-            return "Only helper lemma proofs (`theorem ... := by sorry`) may contain sorry; found sorry in:\n" + d[:500]
+    err = _check_skeleton_structure(problem, sk, ancestors)
+    if err is not None:
+        return err
     code, _ = render(problem, sk.candidate)
     # sorry is expected; drop FORBIDDEN check for skeleton but compile it
     res = compile_lean(code)
@@ -157,8 +198,13 @@ def validate_skeleton(problem: Problem, sk: Skeleton) -> str | None:
 
 
 def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 4, cancelled=None,
-                  priority: int = 0, premises: str = "", plan: str = "") -> Skeleton | None:
+                  priority: int = 0, premises: str = "", plan: str = "",
+                  ancestors: frozenset[str] = frozenset()) -> Skeleton | None:
     extra = ""
+    if problem.context:
+        extra += ("\nAll declarations shown above the target theorem are ALREADY available in the file; "
+                  f"use them freely in your proof of `{problem.name}`, and do NOT repeat or re-state them. "
+                  f"Decompose ONLY the target theorem `{problem.name}`.\n")
     if plan:
         extra += f"\nAn informal proof worked out earlier (use it if it is sound):\n{plan[-4000:]}\n"
     if premises:
@@ -172,14 +218,15 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
         if cancelled is not None and cancelled():
             return None
         try:
-            resp = llm.chat_salvage(messages, max_tokens=16000, temperature=0.8, stop_check=cancelled, priority=priority,
+            resp = llm.chat_salvage(messages, max_tokens=32000, temperature=0.8, stop_check=cancelled, priority=priority,
                                    final_instruction="Output the informal proof briefly, then one ```lean block with defs, helper lemmas (`:= by sorry`) and the full main theorem.")
         except llm.LLMFailure:
             return None
         if resp.finish_reason == "cancelled":
             return None
         sk = prepare_skeleton(problem, resp.content)
-        fb = "Output one ```lean block with the defs, helper lemmas (proved by sorry) and the full main theorem." if sk is None else validate_skeleton(problem, sk)
+        fb = ("Output one ```lean block with the defs, helper lemmas (proved by sorry) and the full main theorem."
+              if sk is None else validate_skeleton(problem, sk, ancestors))
         with (out_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"round": rnd, "ok": fb is None, "feedback": fb, "content": resp.content,
                                  "tokens": resp.completion_tokens}, ensure_ascii=False) + "\n")
@@ -309,12 +356,145 @@ def cache_store(problem: Problem, cand: Candidate) -> None:
                              "body": cand.body}, ensure_ascii=False) + "\n")
 
 
-def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: int, max_depth: int,
+def _fresh_ns(idx: int, *texts: str) -> str:
+    ns = f"_lemmata_{idx}"
+    k = 1
+    blob = "\n".join(texts)
+    while re.search(rf"\b{re.escape(ns)}\b", blob):
+        ns = f"_lemmata_{idx}_{k}"
+        k += 1
+    return ns
+
+
+def _scope_sublemma(ns: str, helpers_txt: str, stmt: str, body: str) -> str:
+    """Encapsulate a sub-lemma's internal helpers inside a private Lean namespace so sibling sub-proofs
+    never collide on helper names or leak `open`/`set_option`/`noncomputable` directives."""
+    if not helpers_txt.strip():
+        return stmt + " by\n" + body
+    body_lines = body.rstrip().splitlines()
+    while body_lines and re.match(r"^\s*end(?:\s+[^\s]+)?\s*$", re.sub(r"--[^\n]*", "", body_lines[-1])):
+        body_lines.pop()
+    clean_body = "\n".join(body_lines).rstrip()
+    clean = re.sub(r"/-.*?-/", lambda m: "\n" * m.group(0).count("\n"), helpers_txt, flags=re.S)
+    clean = re.sub(r"--[^\n]*", "", clean)
+    scopes: list[tuple[str, str, list[str], bool]] = [("root", "", [], False)]
+    for raw in clean.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        m = re.match(r"^(noncomputable\s+)?section(?:\s+([^\s]+))?\s*$", s)
+        if m:
+            scopes.append(("section", m.group(2) or "", [], bool(m.group(1))))
+            continue
+        m = re.match(r"^namespace\s+([^\s]+)\s*$", s)
+        if m:
+            for part in m.group(1).split("."):
+                scopes.append(("namespace", part, [], False))
+            continue
+        m = re.match(r"^end(?:\s+([^\s]+))?\s*$", s)
+        if m:
+            n_pop = len(m.group(1).split(".")) if m.group(1) else 1
+            for _ in range(n_pop):
+                if len(scopes) > 1:
+                    scopes.pop()
+            continue
+        if re.match(r"^(?:open|set_option)\b", s) and not re.search(r"\bin\s*$", s):
+            scopes[-1][2].append(s)
+    closers = [f"end {nm}" if nm else "end" for _, nm, _, _ in reversed(scopes[1:])]
+    is_nc = any(nc for _, _, _, nc in scopes)
+    seen_d: set[str] = set()
+    active_dirs: list[str] = []
+    for _, _, ds, _ in scopes:
+        for d in ds:
+            if d not in seen_d:
+                seen_d.add(d)
+                active_dirs.append(d)
+    sec_open = "noncomputable section" if is_nc else "section"
+    parts = [sec_open, f"namespace {ns}", helpers_txt]
+    if closers:
+        parts.append("\n".join(closers))
+    parts.extend([f"end {ns}", f"open scoped {ns}", f"open {ns}"])
+    if active_dirs:
+        parts.append("\n".join(active_dirs))
+    parts.extend([stmt + " by\n" + clean_body, "end"])
+    return "\n\n".join(parts)
+
+
+def _previous_skeletons(problem: Problem, exclude_dir: Path, limit: int = 2,
+                        ancestors: frozenset[str] = frozenset()) -> list[str]:
+    """Reusable skeletons from earlier runs that already proved at least one sub-lemma and hit no counterexample."""
+    from .paths import RUNS_DIR
+    key = _cache_key(problem)
+    exc = exclude_dir.resolve()
+    try:
+        pjs = [p for p in RUNS_DIR.rglob(f"{problem.name}/problem.json") if not p.resolve().is_relative_to(exc)]
+    except OSError:
+        return []
+    scored: list[tuple[tuple[float, int, float], tuple[str, str], str]] = []
+    for pj in pjs:
+        try:
+            d = json.loads(pj.read_text(encoding="utf-8"))
+            if _cache_key(Problem(**d)) != key:
+                continue
+            mtime = pj.stat().st_mtime
+            for sj in sorted(pj.parent.glob("sketch_*/skeletons.jsonl")):
+                sk_dir = sj.parent
+                if any(sk_dir.rglob("falsified.txt")):
+                    continue
+                asm = sk_dir / "assembly.json"
+                if asm.exists():
+                    asm_data = json.loads(asm.read_text(encoding="utf-8"))
+                    asm_errs = asm_data.get("errors") or []
+                    if not asm_data.get("solved") and not (
+                        asm_errs and all("already been declared" in e for e in asm_errs)
+                    ):
+                        continue
+                for line in sj.read_text(encoding="utf-8").splitlines():
+                    row = json.loads(line)
+                    c = row.get("content")
+                    if not (row.get("ok") and c):
+                        continue
+                    parsed = parse_skeleton(problem, c)
+                    if parsed is None or not parsed.lemmas:
+                        continue
+                    if re.search(r"\bsorry\b", re.sub(r"--[^\n]*", "", parsed.candidate.body)):
+                        continue
+                    if _check_skeleton_structure(problem, parsed, ancestors) is not None:
+                        continue
+                    kept_names = [n for n, _ in parsed.lemmas]
+                    proved_nodes = sum(len(list((sk_dir / n).rglob("proof.lean")))
+                                       for n in kept_names if (sk_dir / n).is_dir())
+                    if proved_nodes == 0:
+                        continue
+                    total = max(1, len(kept_names))
+                    solved = sum((sk_dir / n / "proof.lean").exists() for n in kept_names)
+                    dedup_key = (re.sub(r"\s+", " ", parsed.candidate.helpers).strip(),
+                                 re.sub(r"\s+", " ", parsed.candidate.body).strip())
+                    scored.append(((solved / total, proved_nodes, mtime), dedup_key, c))
+        except Exception:
+            continue
+    scored.sort(key=lambda item: item[0], reverse=True)
+    seen: set[tuple[str, str]] = set()
+    out: list[str] = []
+    for _, dedup_key, c in scored:
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            out.append(c)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: int, max_depth: int | None = None,
           sketches: int, deadline: float, log=print, hint: str = "",
-          cancels: tuple = (), seed_skeletons: list | None = None, root: dict | None = None) -> Candidate | None:
+          cancels: tuple = (), seed_skeletons: list | None = None, root: dict | None = None,
+          ancestors: frozenset[str] = frozenset()) -> Candidate | None:
     root = root if root is not None else {"calls": 0, "name": problem.name}
+    cur_ancestors = ancestors | {_stmt_prop(problem.statement)}
     from .agent import runtime_config
     cfg = runtime_config()
+    if max_depth is None:
+        max_depth = max(0, int(cfg.get("max_depth", 8)))
     out_dir.mkdir(parents=True, exist_ok=True)
     import dataclasses
     (out_dir / "problem.json").write_text(json.dumps(dataclasses.asdict(problem), ensure_ascii=False), encoding="utf-8")
@@ -341,6 +521,15 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
     if auto is not None:
         log(f"[depth {depth}] {problem.name}: solved by automation")
         return auto
+
+    base_sketches = sketches
+    if seed_skeletons is None and depth < max_depth and cfg.get("resume_previous", True):
+        seed_skeletons = _previous_skeletons(problem, out_dir, limit=max(1, min(2, base_sketches)),
+                                             ancestors=cur_ancestors)
+        sketches = base_sketches + len(seed_skeletons)
+    elif seed_skeletons:
+        seed_skeletons = list(seed_skeletons)
+        sketches = max(sketches, len(seed_skeletons))
 
     result: list[Candidate] = []
     result_lock = threading.Lock()
@@ -389,6 +578,19 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
             with state.lock:
                 has_harvest = bool(state.harvested)
             with seeds_lock:
+                has_seeds = bool(seed_skeletons)
+            if not has_seeds and not has_harvest and not direct_done.is_set():
+                if depth == 0 and cfg.get("race_top", True):
+                    if not state.stalled:
+                        time.sleep(5)
+                        continue
+                else:
+                    direct()
+                    if cancelled():
+                        return
+                    with state.lock:
+                        has_harvest = bool(state.harvested)
+            with seeds_lock:
                 if next_index[0] >= sketches and not has_harvest:
                     s = None
                 else:
@@ -405,19 +607,28 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
             sk_dir = out_dir / f"sketch_{s}"
             sk_dir.mkdir(exist_ok=True)
             sk = None
-            with state.lock:
-                pending = state.harvested.pop() if state.harvested else None
-            if pending is not None:
+            while sk is None:
+                with state.lock:
+                    pending = state.harvested.pop() if state.harvested else None
+                if pending is None:
+                    break
                 hskel, hlemmas, horder = pending
-                sk = Skeleton(hskel, [t for k, t in horder if k == "decl"], hlemmas, horder, "")
-                log(f"[depth {depth}] {problem.name}: using harvested sorry-skeleton")
+                cand_sk = _build_skeleton(hskel, "")
+                if validate_skeleton(problem, cand_sk, cur_ancestors) is None:
+                    sk = cand_sk
+                    log(f"[depth {depth}] {problem.name}: using harvested sorry-skeleton")
+                    rendered_sk, _ = render(problem, cand_sk.candidate, check_axioms=False)
+                    raw_h = f"```lean4\n{rendered_sk}```"
+                    with (sk_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps({"round": "harvested", "ok": True, "feedback": None, "content": raw_h},
+                                            ensure_ascii=False) + "\n")
             while sk is None:
                 with seeds_lock:
                     raw = seed_skeletons.pop(0) if seed_skeletons else None
                 if raw is None:
                     break
                 cand_sk = prepare_skeleton(problem, raw)
-                if cand_sk is not None and validate_skeleton(problem, cand_sk) is None:
+                if cand_sk is not None and validate_skeleton(problem, cand_sk, cur_ancestors) is None:
                     sk = cand_sk
                     log(f"[depth {depth}] {problem.name}: resumed skeleton from a previous run")
                     with (sk_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
@@ -429,7 +640,8 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                 root["calls"] += 1
                 sk = make_skeleton(problem, sk_dir, failures, cancelled=cancelled,
                                    priority=int(cfg.get("depth_weight", 2)) * depth + 1 - root["calls"] // int(cfg.get("fair_share_calls", 1)),
-                                   premises=state.premises or "", plan=state.plan or "")
+                                   premises=state.premises or "", plan=state.plan or "",
+                                   ancestors=cur_ancestors)
             if sk is None:
                 log(f"[depth {depth}] {problem.name}: sketch {s} invalid")
                 continue
@@ -448,9 +660,9 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
 
             def sub(item):
                 r = solve(item[1], sk_dir / item[0], depth + 1, chains=max(1, chains - 1), rounds=rounds,
-                          max_depth=max_depth, sketches=max(1, sketches - 1), deadline=deadline, log=log,
+                          max_depth=max_depth, sketches=max(1, base_sketches - 1), deadline=deadline, log=log,
                           hint="Overall informal proof this lemma is part of:\n" + sk.prose[-2500:],
-                          cancels=cancels + (sketch_cancel,), root=root)
+                          cancels=cancels + (sketch_cancel,), root=root, ancestors=cur_ancestors)
                 if r is None:
                     failed.append(item[0])
                     sketch_cancel.set()  # one lemma failed: abandon this sketch
@@ -478,15 +690,17 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                                         "into smaller, clearly true steps:\n" + "\n---\n".join(parts)[:4000] + "\n")
                 continue
             proved = {n: r for (n, _), r in zip(subs, results)}
+            stmt_map = dict(sk.lemmas)
             helpers = []
+            lemma_idx = 0
             for kind, item in sk.order:
                 if kind == "decl":
                     helpers.append(item)
                 else:
                     r = proved[item]
-                    if r.helpers:
-                        helpers.append(r.helpers)
-                    helpers.append(dict(sk.lemmas)[item] + " by\n" + r.body)
+                    ns = _fresh_ns(lemma_idx, r.helpers, r.body, stmt_map[item])
+                    lemma_idx += 1
+                    helpers.append(_scope_sublemma(ns, r.helpers, stmt_map[item], r.body))
             final = Candidate("\n\n".join(helpers), sk.candidate.body, dict(sk.candidate.solutions))
             v = check(problem, final)
             with (sk_dir / "assembly.json").open("w", encoding="utf-8") as fh:
@@ -499,7 +713,11 @@ def solve(problem: Problem, out_dir: Path, depth: int, *, chains: int, rounds: i
                 return
             log(f"[depth {depth}] {problem.name}: assembly failed: {v.reason} {[m.text[:200] for m in v.result.errors[:2]]}")
 
-    if depth == 0 and depth < max_depth and (cfg.get("race_top", True) or seed_skeletons):
+    if depth < max_depth and seed_skeletons:
+        decomposition()
+        if not result and not direct_done.is_set() and not cancelled():
+            direct()
+    elif depth == 0 and depth < max_depth and cfg.get("race_top", True):
         # top level: direct attempts and decomposition race each other
         threads = [threading.Thread(target=direct), threading.Thread(target=decomposition)]
         for t in threads:

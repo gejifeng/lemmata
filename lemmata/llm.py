@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -64,20 +65,21 @@ def _headers(s: dict) -> dict:
 
 def _request_body(s: dict, messages: list[dict], *, max_tokens: int, temperature: float, thinking: bool,
                   prefill: str | None, stream: bool, n: int = 1) -> tuple[dict, str | None]:
-    """Returns (request body, the prefill actually sent). Only vLLM continues an assistant prefill."""
+    """Returns (request body, the prefill actually sent to the server)."""
     body: dict = {"model": s["model"], "messages": list(messages), "max_tokens": max_tokens}
+    sent_prefill = None
     if s["style"] == "vllm":
         body.update(temperature=temperature, top_p=0.95, chat_template_kwargs={"enable_thinking": thinking})
         if not thinking:
             body["repetition_penalty"] = 1.05
         if n > 1:
             body["n"] = n
-        if prefill:
+        if prefill and os.environ.get("LEMMATA_ASSISTANT_PREFILL") == "1":
             body["messages"].append({"role": "assistant", "content": prefill})
             body["add_generation_prompt"] = False
             body["continue_final_message"] = True
+            sent_prefill = prefill
     else:
-        prefill = None
         if s["style"] == "deepseek":
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
         if not thinking or s["style"] == "openai":
@@ -87,7 +89,7 @@ def _request_body(s: dict, messages: list[dict], *, max_tokens: int, temperature
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
-    return body, prefill
+    return body, sent_prefill
 
 
 def _http_error(status: int, raw: bytes) -> LLMFailure:
@@ -180,6 +182,18 @@ class LLMResponse:
 
 
 REPEAT_LINES = 12  # this many recent non-empty lines with at most 2 distinct values = a degenerate loop
+
+
+SPECIAL_TOKENS = re.compile(r"<｜(?:begin|end)▁of▁sentence｜>")
+
+
+def _apply_prefill(prefill: str | None, text: str) -> str:
+    text = SPECIAL_TOKENS.sub("", text)
+    if not prefill:
+        return text
+    if "```" in prefill and (text.lstrip().startswith("```") or (text.count("```") >= 2 and text.count("```") % 2 == 0)):
+        return text
+    return prefill + text
 
 
 def chat(messages: list[dict], *, max_tokens: int = 16000, temperature: float = 0.7,
@@ -285,14 +299,12 @@ def _chat_once(messages, *, max_tokens, temperature, thinking, total_timeout, st
         STATS["completion_tokens"] += ctoks
         STATS["reasoning_tokens"] += rtoks
         STATS["seconds"] += secs
-    text = "".join(content)
-    if prefill:
-        text = prefill + text
+    text = _apply_prefill(prefill, "".join(content))
     return LLMResponse(text, "".join(reasoning), ctoks, finish, secs)
 
 
-def chat_salvage(messages: list[dict], *, max_tokens: int = 14000, temperature: float = 0.8,
-                 stop_check=None, final_instruction: str = "", answer_tokens: int = 6000,
+def chat_salvage(messages: list[dict], *, max_tokens: int = 32000, temperature: float = 0.8,
+                 stop_check=None, final_instruction: str = "", answer_tokens: int = 12000,
                  prefill: str | None = "```lean4\n", priority: int = 0) -> LLMResponse:
     """Thinking call; if the budget is exhausted while still thinking, ask a non-thinking follow-up
     to turn the partial reasoning into a final answer."""
@@ -324,21 +336,25 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
         return [chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
                      prefill=prefill, priority=priority, stop_check=stop_check)]
     s = settings()
-    if s["style"] != "vllm":
-        # only vLLM returns several samples for one request; elsewhere send n requests side by side
-        model = s["model"]
+    model = s["model"]
 
+    def _parallel() -> list[LLMResponse]:
         def one(_):
             with use_model(model):
                 return chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
                             prefill=prefill, priority=priority, stop_check=stop_check)
         with ThreadPoolExecutor(max_workers=n) as ex:
             return list(ex.map(one, range(n)))
+
+    if s["style"] != "vllm":
+        # only vLLM returns several samples for one request; elsewhere send n requests side by side
+        return _parallel()
     url = urllib.parse.urlparse(s["base_url"].rstrip("/") + "/chat/completions")
     body, prefill = _request_body(s, messages, max_tokens=max_tokens, temperature=temperature, thinking=False,
                                   prefill=prefill, stream=False, n=n)
     if not _quick_sem.acquire(priority, stop_check):
         return [LLMResponse("", "", 0, "cancelled", 0.0)]
+    fallback_parallel = False
     try:
         if stop_check is not None and stop_check():
             return [LLMResponse("", "", 0, "cancelled", 0.0)]
@@ -348,15 +364,20 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
             conn.request("POST", url.path, body=json.dumps(body), headers=_headers(s))
             resp = conn.getresponse()
             raw = resp.read()
-            if resp.status != 200:
+            if resp.status == 400:
+                fallback_parallel = True
+            elif resp.status != 200:
                 raise _http_error(resp.status, raw)
-            d = json.loads(raw)
+            else:
+                d = json.loads(raw)
         except (OSError, http.client.HTTPException, ValueError) as exc:
             raise LLMFailure(f"transport: {exc}") from exc
         finally:
             conn.close()
     finally:
         _quick_sem.release()
+    if fallback_parallel:
+        return _parallel()
     secs = time.time() - start
     usage = d.get("usage") or {}
     ctoks = int(usage.get("completion_tokens") or 0)
@@ -367,8 +388,6 @@ def chat_n(messages: list[dict], n: int, *, max_tokens: int = 4000, temperature:
     out = []
     choices = sorted(d.get("choices") or [], key=lambda c: c.get("index", 0))
     for ch in choices:
-        text = (ch.get("message") or {}).get("content") or ""
-        if prefill:
-            text = prefill + text
+        text = _apply_prefill(prefill, (ch.get("message") or {}).get("content") or "")
         out.append(LLMResponse(text, "", ctoks // max(1, len(choices)), ch.get("finish_reason"), secs))
     return out

@@ -14,10 +14,18 @@ _by_last: dict[str, list[str]] = defaultdict(list)
 _tokens: dict[str, set[str]] = defaultdict(set)
 
 UNKNOWN_PATTERNS = [
-    re.compile(r"[Uu]nknown (?:identifier|constant) [`'«]?([^`'»\s]+)"),
-    re.compile(r"the environment does not contain [`']([^`'\s]+)"),
-    re.compile(r"invalid field [`']([^`'\s]+)[`']"),
+    re.compile(r"[Uu]nknown (?:identifier|constant) [`'«]?([^`'»\s:]+)"),
+    re.compile(r"[Tt]he environment does not contain [`'«]?([^`'»\s:]+)"),
+    re.compile(r"[Ii]nvalid field [`'«]?([^`'»\s:]+)[`'»]?"),
 ]
+
+_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+_STOP_TOKENS = {"the", "and", "for", "with"}
+
+
+def _tokenize(s: str) -> list[str]:
+    s = _CAMEL_RE.sub(r"\1_\2", s).lower()
+    return [t for t in re.split(r"[._]+", s) if len(t) >= 3 and t not in _STOP_TOKENS]
 
 
 def _load() -> None:
@@ -36,9 +44,8 @@ def _load() -> None:
                 _types[name] = ty
                 last = name.rsplit(".", 1)[-1]
                 _by_last[last.lower()].append(name)
-                for tok in re.split(r"[._]", last.lower()):
-                    if len(tok) >= 3:
-                        _tokens[tok].add(name)
+                for tok in set(_tokenize(name)):
+                    _tokens[tok].add(name)
 
 
 def suggest(ident: str, k: int = 6) -> list[str]:
@@ -52,15 +59,17 @@ def suggest(ident: str, k: int = 6) -> list[str]:
     out: list[str] = []
     out.extend(sorted(_by_last.get(last.lower(), []), key=len)[:k])
     if len(out) < k:
-        toks = [t for t in re.split(r"[._]", last.lower()) if len(t) >= 3]
+        toks = list(dict.fromkeys(_tokenize(ident)))
         pool: dict[str, int] = defaultdict(int)
         for t in toks:
             for n in _tokens.get(t, ()):
                 pool[n] += 1
         if toks:
             best = sorted(pool.items(), key=lambda kv: (-kv[1], len(kv[0])))[:4000]
-            cands = [n for n, c in best if c >= max(1, len(toks) - 1)]
-            scored = sorted(cands, key=lambda n: -difflib.SequenceMatcher(None, ident.lower(), n.lower()).ratio())
+            top_hits = best[0][1] if best else 0
+            min_hits = max(2, top_hits - 1) if top_hits >= 2 else 1
+            cands = [n for n, c in best if c >= min_hits]
+            scored = sorted(cands, key=lambda n: (-pool[n], -difflib.SequenceMatcher(None, ident.lower(), n.lower()).ratio(), len(n)))
             for n in scored:
                 if n not in out:
                     out.append(n)
@@ -78,19 +87,27 @@ def annotate_errors(feedback: str) -> str:
     if not idents:
         return ""
     lines = []
+    has_missing = False
     for ident in idents[:5]:
-        if "." not in ident and "_" not in ident:
+        if "." not in ident and "_" not in ident and not _CAMEL_RE.search(ident):
             continue  # probably a local variable
         sug = suggest(ident)
         if not sug:
+            lines.append(f"- `{ident}` does not exist in this Mathlib.")
+            has_missing = True
             continue
         if sug == [ident.strip("`'«»")]:
             lines.append(f"- `{ident}` exists (check namespace/arguments):")
         else:
+            has_missing = True
             lines.append(f"- `{ident}` does not exist. Real Mathlib declarations with similar names:")
         for n in sug:
             ty = _types.get(n, "")
             lines.append(f"    {n} : {ty[:250]}")
     if not lines:
         return ""
+    if has_missing:
+        lines.append("  Note: never keep a non-existent identifier. If none of the real declarations above is a "
+                     "direct match (or its type uses subtypes/bundled equivalences differently), replace it with an "
+                     "explicit `have h : ... := by ...` step proved from definitions and basic tactics.")
     return "\n\nName hints (from the actual Mathlib environment):\n" + "\n".join(lines)

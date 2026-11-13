@@ -31,7 +31,7 @@ main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 60px; display: grid
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
 .card h2 { font-size: 16px; margin: 0 0 12px; }
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
-textarea, input[type=text], input[type=password], select {
+textarea, input[type=text], input[type=password], input[type=number], select {
   width: 100%; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
   border-radius: 7px; padding: 8px 10px; }
 textarea { resize: vertical; }
@@ -134,7 +134,13 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
             <option value="1" selected>1 h</option>
             <option value="2">2 h</option>
             <option value="6">6 h</option>
+            <option value="12">12 h</option>
+            <option value="24">24 h</option>
           </select>
+        </div>
+        <div>
+          <label for="max-depth" data-i18n="maxDepth"></label>
+          <input type="number" id="max-depth" min="0" max="20" step="1" value="8" style="width:92px">
         </div>
       </div>
       <div class="row">
@@ -210,7 +216,7 @@ const T = {
     meaningLabel: "另一次独立请求只看 Lean 代码给出的解读,请与原题对照",
     notesLabel: "形式化时的歧义与取舍",
     confirmNote: "Lean 只保证「这个 Lean 命题」被证明。开始证明前,请确认它和你想证明的数学命题含义一致:假设没有多也没有少,数的类型正确,结论(包括答案)没有被改动。",
-    model: "模型", budget: "时间上限", check: "检查命题", checking: "Lean 正在检查…",
+    model: "模型", budget: "时间上限", maxDepth: "最大分解深度", check: "检查命题", checking: "Lean 正在检查…",
     prove: "开始证明", starting: "正在启动…",
     compiles: "命题可以通过 Lean 编译(证明为 sorry),可以开始证明。",
     notCompile: "命题无法编译:",
@@ -240,7 +246,7 @@ const T = {
     meaningLabel: "What a separate request, seeing only the Lean code, says it means; compare it with your problem",
     notesLabel: "Ambiguities and choices made while formalizing",
     confirmNote: "Lean only guarantees that this Lean statement is proved. Before proving, check that it means what you intend: no missing or extra hypotheses, the right number types, and the conclusion (including any answer) unchanged.",
-    model: "Model", budget: "Time limit", check: "Check statement", checking: "Lean is checking…",
+    model: "Model", budget: "Time limit", maxDepth: "Max depth", check: "Check statement", checking: "Lean is checking…",
     prove: "Prove", starting: "Starting…",
     compiles: "The statement compiles (with sorry as the proof). Ready to prove.",
     notCompile: "The statement does not compile:",
@@ -268,7 +274,7 @@ if (!T[lang]) lang = "zh";
 const $ = (id) => document.getElementById(id);
 const t = (k) => T[lang][k] ?? k;
 
-let mode = "nl", checkedText = null, informal = "", status = null, selected = null, formalizing = false;
+let mode = "nl", checkedText = null, informal = "", status = null, selected = null, formalizing = false, maxDepthEdited = false;
 
 function applyLang() {
   document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
@@ -305,6 +311,7 @@ async function loadStatus() {
   const models = [...new Set([status.settings.model, ...status.settings.models])];
   sel.replaceChildren(...models.map((m) => new Option(m, m)));
   sel.value = models.includes(cur) ? cur : status.settings.model;
+  if (!maxDepthEdited && status.settings.max_depth != null) $("max-depth").value = status.settings.max_depth;
   renderStatus();
 }
 
@@ -392,8 +399,10 @@ async function doProve() {
   $("btn-prove").disabled = true;
   spinner($("p-status"), t("starting"));
   try {
+    const rawDepth = parseInt($("max-depth").value, 10);
+    const maxDepth = Number.isNaN(rawDepth) ? 8 : Math.max(0, Math.min(20, rawDepth));
     const job = await api("/api/prove", { lean: $("lean").value, informal: mode === "nl" ? informal : "",
-      model: $("model").value, hours: parseFloat($("hours").value) });
+      model: $("model").value, hours: parseFloat($("hours").value), max_depth: maxDepth });
     $("p-status").textContent = "";
     selected = job.id;
     await refreshJobs();
@@ -452,6 +461,7 @@ $("tab-lean").onclick = () => setMode("lean");
 $("btn-formalize").onclick = doFormalize;
 $("btn-check").onclick = doCheck;
 $("btn-prove").onclick = doProve;
+$("max-depth").addEventListener("input", () => { maxDepthEdited = true; });
 $("lean").addEventListener("input", () => {
   if (checkedText !== null && checkedText !== $("lean").value) setNote($("check-status"), "warn", t("editedRecheck"));
   syncProve();
