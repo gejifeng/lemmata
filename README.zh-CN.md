@@ -188,6 +188,10 @@ python3 -m lemmata.campaign --set easy --hours 6 --run my_run
 # 继续攻难题，复用之前几轮的骨架（引理缓存和最好的尝试会自动复用）
 python3 -m lemmata.campaign --set main --hours 12 --run my_run2 --resume-from my_run
 
+# 可选开启本地/OpenAI `/v1/embeddings` 语义增强（跨题经验库 + 检索精排 + 捏造标识符语义对齐）
+python3 -m lemmata.campaign my_theorem.lean --hours 1 --embedding
+python3 -m lemmata.campaign my_theorem.lean --hours 1 --embedding --emb-features experience,search,names
+
 # 从零重新验证所有已解出的 PutnamBench 题，并汇总到 results/proofs/
 python3 -m lemmata.report all
 
@@ -213,6 +217,7 @@ python3 -m lemmata.selftest
 | `fair_share_calls` | 3 | 一道题每用掉 N 次模型调用，优先级降 1 |
 | `resume_previous` / `lemma_cache` | true / true | 复用之前几轮的尝试和引理 |
 | `save_trajectories` | true | 无损落盘完整提示 `messages` 与 `<think>` 思维链 `reasoning`（`llm_calls.jsonl`、`attempts.jsonl`、`skeletons.jsonl`），可用 `python3 -m lemmata.dataset` 或网页端一键导出 SFT/DPO/RL 训练数据 |
+| `embedding` / `embedding_url` | false / `http://127.0.0.1:8090/v1/embeddings` | 可选插拔式 `/v1/embeddings` 语义增强（包含 `emb_experience`、`emb_search`、`emb_names`、`emb_repair` 四个可独立消融的子开关；服务离线时自动优雅降级） |
 
 环境变量（写在 `.env` 里，或在 shell 中设置）：
 
@@ -246,6 +251,7 @@ lemmata/
   llm.py         流式客户端（DeepSeek / vLLM / OpenAI 三种类型）、优先级调度、thinking 预算挽救
   search.py      LeanSearch / Loogle 检索，并对照本地 Mathlib 核验
   names.py       为不存在的标识符推荐真实名字
+  embed.py       可选的 SQLite 持久化 `/v1/embeddings` 经验向量库与语义重排模块
   autopatch.py   确定性修复（自动化 tactic 组合 + exact?、删除多余 tactic）
   harvest.py     用 `extract_goal` 把 `sorry` 缺口变成引理
   history.py     每个陈述之前最好的尝试

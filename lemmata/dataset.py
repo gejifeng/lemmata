@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from .agent import SYSTEM, initial_prompt
-from .decompose import CODE_BLOCK_STRIP, SKETCH_PROMPT, SKETCH_SYSTEM, prepare_skeleton
+from .decompose import CODE_BLOCK_STRIP, SKETCH_PROMPT, SKETCH_SYSTEM, parse_skeleton
 from .paths import RUNS_DIR
 from .problem import Problem, candidate_block, prune_unused, split_full_code
 
@@ -309,7 +309,7 @@ def export_run(run_dir: Path, *, kinds: set[str] | None = None, think_tags: bool
                     if rnd_tag in ("resumed", "harvested") and not include_resumed:
                         continue
                     raw_c = srow.get("content") or ""
-                    sk = prepare_skeleton(problem, raw_c)
+                    sk = parse_skeleton(problem, raw_c)
                     if sk is None:
                         continue
                     cblock = srow.get("clean_block") or candidate_block(problem, sk.candidate)

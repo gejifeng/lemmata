@@ -53,11 +53,14 @@ def environment() -> dict:
 
 def public_settings() -> dict:
     s = llm.settings()
+    cfg = runtime_config()
     key = s["api_key"]
     return {"base_url": s["base_url"], "model": s["model"], "style": s["style"], "has_key": bool(key),
             "key_hint": (key[:3] + "…" + key[-4:]) if len(key) > 10 else ("set" if key else ""),
             "models": llm.DEEPSEEK_MODELS, "styles": list(llm.API_STYLES),
-            "max_depth": int(runtime_config().get("max_depth", 8))}
+            "max_depth": int(cfg.get("max_depth", 8)),
+            "embedding": bool(cfg.get("embedding", False)),
+            "embedding_url": cfg.get("embedding_url", "http://127.0.0.1:8090/v1/embeddings")}
 
 
 def save_settings(body: dict) -> dict:
@@ -65,12 +68,14 @@ def save_settings(body: dict) -> dict:
     if (body.get("api_key") or "").strip():
         values["LEMMATA_API_KEY"] = body["api_key"].strip()
     for field, key in (("base_url", "LEMMATA_BASE_URL"), ("model", "LEMMATA_MODEL"),
-                       ("style", "LEMMATA_API_STYLE")):
+                       ("style", "LEMMATA_API_STYLE"), ("embedding_url", "LEMMATA_EMBEDDING_URL")):
         v = (body.get(field) or "").strip()
         if v:
             if "\n" in v or "\r" in v:
                 raise ValueError(f"invalid {field}")
             values[key] = v
+    if "embedding" in body and body["embedding"] is not None:
+        values["LEMMATA_EMBEDDING"] = "1" if body["embedding"] else "0"
     if values.get("LEMMATA_API_STYLE", "deepseek") not in llm.API_STYLES:
         raise ValueError("unknown API style")
     if values:
@@ -111,26 +116,30 @@ def _job_dir(jid: str) -> Path:
     return d
 
 
-def start_job(lean: str, informal: str, model: str | None, hours: float, max_depth: int | None = None) -> dict:
+def start_job(lean: str, informal: str, model: str | None, hours: float, max_depth: int | None = None,
+              embedding: bool | None = None) -> dict:
     problem = parse_lean_problem(lean, informal=informal)
     ok, errors = check_statement(problem)
     if not ok:
         raise ValueError("the statement does not compile:\n" + errors)
     hours = max(0.05, min(MAX_HOURS, float(hours)))
+    cfg = runtime_config()
     if max_depth is None:
-        max_depth = int(runtime_config().get("max_depth", 8))
+        max_depth = int(cfg.get("max_depth", 8))
     max_depth = max(0, min(MAX_DEPTH_CAP, int(max_depth)))
+    use_emb = bool(cfg.get("embedding", False)) if embedding is None else bool(embedding)
     jid = time.strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
     d = RUNS_DIR / f"web_{jid}"
     d.mkdir(parents=True)
     (d / "problem.lean").write_text(problem.header + "\n\n" + problem.display() + "\n", encoding="utf-8")
     model = model or llm.settings()["model"]
     meta = {"id": jid, "name": problem.name, "model": model, "hours": hours, "max_depth": max_depth,
-            "informal": informal, "statement": problem.statement, "created": time.time()}
+            "embedding": use_emb, "informal": informal, "statement": problem.statement, "created": time.time()}
     (d / "job.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     env = dict(os.environ, LEMMATA_MODEL=model, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     cmd = [sys.executable, "-m", "lemmata.campaign", str(d / "problem.lean"), "--run", d.name,
-           "--hours", f"{hours:g}", "--max-depth", str(max_depth)]
+           "--hours", f"{hours:g}", "--max-depth", str(max_depth),
+           "--embedding" if use_emb else "--no-embedding"]
     kw: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
     with (d / "stdout.log").open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT, **kw)
@@ -203,7 +212,8 @@ def job_status(jid: str, *, full: bool = False) -> dict:
         state = "interrupted"  # the server was restarted while this job ran
     llm_stats = stats.get("llm") or {}
     out = {"id": jid, "name": meta["name"], "model": meta.get("model", ""), "hours": meta.get("hours"),
-           "max_depth": meta.get("max_depth"), "created": meta.get("created"), "state": state,
+           "max_depth": meta.get("max_depth"), "embedding": bool(meta.get("embedding", False)),
+           "created": meta.get("created"), "state": state,
            "elapsed_s": stats.get("wall_s") or (time.time() - meta["created"] if running else None),
            "tokens": llm_stats.get("completion_tokens", 0), "calls": llm_stats.get("calls", 0)}
     if full:
@@ -314,6 +324,9 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"ok": True, "reply": llm.ping()})
                     except llm.LLMFailure as exc:
                         return self._json({"ok": False, "error": str(exc)})
+            if path == "/api/ping-embed":
+                from . import embed
+                return self._json(embed.ping(body.get("embedding_url")))
             if path == "/api/formalize":
                 return self._json({"id": start_formalize(body.get("text", ""), body.get("model"))})
             if path == "/api/check":
@@ -325,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": ok, "name": problem.name, "errors": errors})
             if path == "/api/prove":
                 return self._json(start_job(body.get("lean", ""), body.get("informal", ""), body.get("model"),
-                                            body.get("hours", 1), body.get("max_depth")))
+                                            body.get("hours", 1), body.get("max_depth"), body.get("embedding")))
             m = re.fullmatch(r"/api/jobs/([\w]+)/stop", path)
             if m:
                 return self._json(stop_job(m.group(1)))

@@ -48,17 +48,20 @@ def _load() -> None:
                     _tokens[tok].add(name)
 
 
-def suggest(ident: str, k: int = 6) -> list[str]:
+def suggest(ident: str, k: int = 6, context: str = "") -> list[str]:
     _load()
     if not _types:
         return []
     ident = ident.strip("`'«»")
     if ident in _types:
         return [ident]
+    from . import embed
+    use_emb = embed.emb_enabled("names")
+    pool_k = max(k, 20) if use_emb else k
     last = ident.rsplit(".", 1)[-1]
     out: list[str] = []
-    out.extend(sorted(_by_last.get(last.lower(), []), key=len)[:k])
-    if len(out) < k:
+    out.extend(sorted(_by_last.get(last.lower(), []), key=len)[:pool_k])
+    if len(out) < pool_k:
         toks = list(dict.fromkeys(_tokenize(ident)))
         pool: dict[str, int] = defaultdict(int)
         for t in toks:
@@ -73,12 +76,14 @@ def suggest(ident: str, k: int = 6) -> list[str]:
             for n in scored:
                 if n not in out:
                     out.append(n)
-                if len(out) >= k:
+                if len(out) >= pool_k:
                     break
+    if use_emb and len(out) > 1:
+        return embed.rerank_identifiers(ident, context, [(n, _types.get(n, "")) for n in out], k=k)
     return out[:k]
 
 
-def annotate_errors(feedback: str) -> str:
+def annotate_errors(feedback: str, context: str = "") -> str:
     idents: list[str] = []
     for pat in UNKNOWN_PATTERNS:
         for m in pat.finditer(feedback):
@@ -88,10 +93,11 @@ def annotate_errors(feedback: str) -> str:
         return ""
     lines = []
     has_missing = False
+    err_ctx = context or feedback[:900]
     for ident in idents[:5]:
         if "." not in ident and "_" not in ident and not _CAMEL_RE.search(ident):
             continue  # probably a local variable
-        sug = suggest(ident)
+        sug = suggest(ident, context=err_ctx)
         if not sug:
             lines.append(f"- `{ident}` does not exist in this Mathlib.")
             has_missing = True

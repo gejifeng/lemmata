@@ -366,7 +366,7 @@ def format_feedback(code: str, verdict: Verdict, max_errors: int = 6, max_chars:
     fb = "\n\n".join(out)[:max_chars]
     try:
         from .names import annotate_errors
-        fb += annotate_errors("\n".join(m.text for m in verdict.result.errors))
+        fb += annotate_errors("\n".join(m.text for m in verdict.result.errors), context=fb[:1200])
     except Exception:
         pass
     return fb

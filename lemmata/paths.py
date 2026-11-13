@@ -20,3 +20,4 @@ RESULTS_DIR = Path(os.environ.get("LEMMATA_RESULTS_DIR", ROOT / "results" / "pro
 NAMES_FILE = WORK_DIR / "mathlib_names.tsv"
 SEARCH_CACHE = WORK_DIR / "search_cache.jsonl"
 LEMMA_CACHE = WORK_DIR / "lemma_cache.jsonl"
+EMBED_DB = WORK_DIR / "embeddings.sqlite"

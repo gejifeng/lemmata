@@ -123,7 +123,14 @@ class ProblemState:
             return False
 
     def record(self, a: Attempt) -> None:
+        first_solve = False
+        prev_fail: Attempt | None = None
         with self.lock:
+            if a.solved:
+                for prev in reversed(self.attempts):
+                    if prev.chain == a.chain and not prev.solved and prev.feedback and prev.clean_block:
+                        prev_fail = prev
+                        break
             self.attempts.append(a)
             with (self.out_dir / "attempts.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(a.__dict__, ensure_ascii=False) + "\n")
@@ -131,6 +138,19 @@ class ProblemState:
                 self.solved = True
                 self.proof_code = a.code
                 (self.out_dir / "proof.lean").write_text(a.code, encoding="utf-8")
+                first_solve = True
+        if first_solve:
+            try:
+                from . import embed
+                if self.solved_candidate is not None:
+                    embed.record_solved_lemma(self.problem, self.solved_candidate,
+                                              source=str(self.out_dir / "proof.lean"))
+                if prev_fail is not None and a.clean_block:
+                    embed.record_verified_repair(self.problem.name, self.problem.statement,
+                                                 prev_fail.feedback, prev_fail.clean_block, a.clean_block,
+                                                 source=str(self.out_dir / "attempts.jsonl"))
+            except Exception:
+                pass
 
 
 from .paths import CONFIG_FILE
@@ -155,16 +175,38 @@ DEFAULT_CONFIG = {
     "resume_previous": True,      # start from the best earlier attempt on the same statement
     "lemma_cache": True,          # reuse lemmas proved in earlier runs
     "save_trajectories": True,    # persist full LLM messages and `<think>` reasoning traces
+    "embedding": False,           # optional local/OpenAI `/v1/embeddings` augmentation (off by default)
+    "embedding_url": "http://127.0.0.1:8090/v1/embeddings",
+    "embedding_model": "",
+    "emb_experience": True,       # semantic retrieval & transfer of proved lemmas + skeletons
+    "emb_search": True,           # semantic reranking of premise search + local Mathlib pool
+    "emb_names": True,            # semantic grounding of unknown/hallucinated identifiers
+    "emb_repair": False,          # error-to-fix diff retrieval (opt-in; kept off until repair corpus is larger)
 }
 
 
 def runtime_config() -> dict:
     """Tunable knobs (see config/default.json), re-read on every use so a running campaign can be adjusted."""
+    import os
     cfg = dict(DEFAULT_CONFIG)
     try:
         cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+    env_emb = (os.environ.get("LEMMATA_EMBEDDING") or "").strip().lower()
+    if env_emb in ("1", "true", "yes", "on"):
+        cfg["embedding"] = True
+    elif env_emb in ("0", "false", "no", "off"):
+        cfg["embedding"] = False
+    if os.environ.get("LEMMATA_EMBEDDING_URL"):
+        cfg["embedding_url"] = os.environ["LEMMATA_EMBEDDING_URL"].strip()
+    if os.environ.get("LEMMATA_EMBEDDING_MODEL"):
+        cfg["embedding_model"] = os.environ["LEMMATA_EMBEDDING_MODEL"].strip()
+    env_feats = (os.environ.get("LEMMATA_EMB_FEATURES") or "").strip()
+    if env_feats:
+        items = {x.strip().lower().removeprefix("emb_") for x in env_feats.split(",") if x.strip()}
+        for fk in ("experience", "search", "names", "repair"):
+            cfg[f"emb_{fk}"] = False if "none" in items else (True if "all" in items else (fk in items))
     return cfg
 
 
@@ -231,7 +273,7 @@ def _evaluate(state: ProblemState, chain_id: int, rnd: int, content: str, resp, 
         if not bare_sorry:
             state.note_errors(len(verdict.result.errors) + (1 if "sorry" in verdict.reason else 0))
         if runtime_config().get("search"):
-            fb += error_search(verdict)
+            fb += error_search(verdict, context=problem.statement)
     if not verdict.solved and not bare_sorry and "sorry" in verdict.reason and verdict.result.ok:
         try:
             from .harvest import harvest
@@ -266,7 +308,7 @@ _ERR_IDENT_PATTERNS = [
 ]
 
 
-def error_search(verdict: Verdict) -> str:
+def error_search(verdict: Verdict, context: str = "") -> str:
     """For unknown identifiers, search Mathlib by the intent encoded in the (wrong) name."""
     from . import search
     idents = []
@@ -283,7 +325,8 @@ def error_search(verdict: Verdict) -> str:
         words = re.sub(r"[._]+", " ", words)
         queries.append(words)
     try:
-        prems = search.search(queries, k=4, limit=8)
+        err_ctx = (context + "\n" + "\n".join(m.text[:300] for m in verdict.result.errors[:3])).strip()
+        prems = search.search(queries, k=4, limit=8, context=err_ctx)
     except Exception:
         return ""
     txt = search.render_premises(prems, "Mathlib search for the intent of the unknown names (verified to exist):")
@@ -322,18 +365,38 @@ def ensure_prep(state: ProblemState, hint: str, priority: int, stop, depth: int 
                                             enabled=save_traj):
         if state.premises is None:
             state.premises = ""
+            prem_parts: list[str] = []
+            qs: list[str] = []
             if cfg.get("search"):
                 try:
                     from . import search
                     with llm.trace_context(stage="query_gen"):
                         qs = search.propose_queries(state.problem.statement + ("\n" + hint[-1500:] if hint else ""),
                                                     priority=priority + 2)
-                    prems = search.search(qs, k=5, limit=14)
-                    state.premises = search.render_premises(prems)
-                    (state.out_dir / "premises.txt").write_text("queries: " + json.dumps(qs, ensure_ascii=False)
-                                                                + "\n\n" + state.premises, encoding="utf-8")
-                except Exception as exc:  # search is optional
-                    state.premises = ""
+                    prems = search.search(qs, k=5, limit=14, context=state.problem.statement)
+                    rendered = search.render_premises(prems)
+                    if rendered:
+                        prem_parts.append(rendered)
+                except Exception:  # search is optional
+                    pass
+            try:
+                from . import embed
+                if embed.emb_enabled("experience", cfg):
+                    exp_items = embed.retrieve_lemmas(state.problem, k=2, min_score=0.64,
+                                                      exclude_name=state.problem.name)
+                    exp_txt = embed.render_lemma_hints(exp_items)
+                    if exp_txt:
+                        prem_parts.append(exp_txt)
+            except Exception:
+                pass
+            state.premises = "\n\n".join(prem_parts)
+            if qs or state.premises:
+                try:
+                    (state.out_dir / "premises.txt").write_text(
+                        "queries: " + json.dumps(qs, ensure_ascii=False) + "\n\n" + state.premises, encoding="utf-8"
+                    )
+                except OSError:
+                    pass
         if state.plan is None and cfg.get("two_stage") and depth <= int(cfg.get("two_stage_max_depth", 1)):
             state.plan = ""
             if stop():
@@ -419,7 +482,7 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
             root["calls"] += 1
             if resp.finish_reason == "cancelled":
                 return state.solved
-            sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
+            sr = search.run_search_blocks(resp.content, context=problem.statement) if cfg.get("search") else ""
             if (sr or "```search" in resp.content) and extract_candidate(problem, resp.content) is None:
                 search_reply = sr or "Search is disabled or returned nothing usable."
                 messages.append({"role": "assistant", "content": resp.content[-8000:] or "(search)"})
@@ -443,7 +506,7 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
                 root["calls"] += 1
                 if resp.finish_reason == "cancelled":
                     return state.solved
-                sr = search.run_search_blocks(resp.content) if cfg.get("search") else ""
+                sr = search.run_search_blocks(resp.content, context=problem.statement) if cfg.get("search") else ""
                 if "```search" in resp.content and extract_candidate(problem, resp.content) is None and not stop():
                     salvage_msgs = messages + [
                         {"role": "assistant", "content": resp.content[-4000:]},
@@ -483,9 +546,18 @@ def run_chain(state: ProblemState, chain_id: int, rounds: int, hint: str = "", t
                     if cur_score == 0:
                         break
                     cur_sorries = len(re.findall(r"\bsorry\b", re.sub(r"--[^\n]*", "", code)))
+                    rep_hint = ""
+                    try:
+                        from . import embed
+                        if embed.emb_enabled("repair", cfg):
+                            rep_items = embed.retrieve_repairs(fb, goal_statement=problem.statement,
+                                                               k=2, min_score=0.75, exclude_name=problem.name)
+                            rep_hint = embed.render_repair_hints(rep_items)
+                    except Exception:
+                        rep_hint = ""
                     repair_msgs = messages + [
                         {"role": "assistant", "content": "```lean4\n" + code + "\n```"},
-                        {"role": "user", "content": "Lean rejected this code. Compiler output:\n\n" + fb +
+                        {"role": "user", "content": "Lean rejected this code. Compiler output:\n\n" + fb + rep_hint +
                          "\n\nRepair these specific errors while keeping the mathematical construction intact "
                          "(do NOT replace nontrivial constructions with trivial stubs just to silence errors). "
                          "Never keep a non-existent identifier: use a verified declaration from the hints "

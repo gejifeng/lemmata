@@ -16,5 +16,12 @@
   "depth_weight": 2,
   "resume_previous": true,
   "lemma_cache": true,
-  "save_trajectories": true
+  "save_trajectories": true,
+  "embedding": false,
+  "embedding_url": "http://127.0.0.1:8090/v1/embeddings",
+  "embedding_model": "",
+  "emb_experience": true,
+  "emb_search": true,
+  "emb_names": true,
+  "emb_repair": false
 }

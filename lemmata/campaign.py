@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import llm
+from . import embed, llm
 from .agent import runtime_config
 from .benchmarks import SETS
 from .decompose import solve
@@ -37,8 +38,20 @@ def main() -> None:
     ap.add_argument("--sketches", type=int, default=3, help="decomposition attempts per (sub)problem")
     ap.add_argument("--resume-from", default="",
                     help="comma-separated earlier runs whose valid top-level skeletons are reused")
+    ap.add_argument("--embedding", action=argparse.BooleanOptionalAction, default=None,
+                    help="enable or disable optional `/v1/embeddings` capability (--embedding / --no-embedding)")
+    ap.add_argument("--embedding-url", default="", help="override `/v1/embeddings` endpoint URL for this run")
+    ap.add_argument("--emb-features", default="",
+                    help="comma-separated embedding sub-modules for ablation: experience,search,names,repair")
     ap.add_argument("--skip-ping", action="store_true", help="do not test the model endpoint before starting")
     args = ap.parse_args()
+
+    if args.embedding is not None:
+        os.environ["LEMMATA_EMBEDDING"] = "1" if args.embedding else "0"
+    if args.embedding_url.strip():
+        os.environ["LEMMATA_EMBEDDING_URL"] = args.embedding_url.strip()
+    if args.emb_features.strip():
+        os.environ["LEMMATA_EMB_FEATURES"] = args.emb_features.strip()
 
     specs = args.problems or SETS[args.set]
     try:
@@ -70,7 +83,13 @@ def main() -> None:
                 fh.write(line + "\n")
 
     max_depth = max(0, args.max_depth if args.max_depth is not None else int(runtime_config().get("max_depth", 8)))
-    log(f"config: hours={args.hours:g} max_depth={max_depth} chains={args.chains} rounds={args.rounds} sketches={args.sketches}")
+    es = embed.emb_settings()
+    emb_desc = "off"
+    if es["enabled"]:
+        ep = embed.ping()
+        active_feats = ",".join(k for k, v in es["features"].items() if v) or "none"
+        emb_desc = f"on({ep['model']}@{es['url']} [{active_feats}])" if ep["ok"] else f"degraded({ep['error']})"
+    log(f"config: hours={args.hours:g} max_depth={max_depth} chains={args.chains} rounds={args.rounds} sketches={args.sketches} embedding={emb_desc}")
 
     results: dict[str, bool] = {}
 
@@ -97,15 +116,16 @@ def main() -> None:
             if ok:
                 (out / name / "FINAL_proof.lean").write_text(v.code, encoding="utf-8")
         results[name] = ok
-        log(f"=== {name}: {'SOLVED' if ok else 'unsolved'}  llm={llm.STATS}")
-        (out / "summary.json").write_text(json.dumps({"results": results, "llm": llm.STATS,
+        log(f"=== {name}: {'SOLVED' if ok else 'unsolved'}  llm={llm.STATS}" +
+            (f"  embed={embed.STATS}" if es["enabled"] else ""))
+        (out / "summary.json").write_text(json.dumps({"results": results, "llm": llm.STATS, "embed": embed.STATS,
                                                       "wall_s": time.time() - t0}, indent=2), encoding="utf-8")
 
     finished = threading.Event()
 
     def report_progress() -> None:  # read by the web UI
         while not finished.wait(15):
-            (out / "progress.json").write_text(json.dumps({"results": results, "llm": llm.STATS,
+            (out / "progress.json").write_text(json.dumps({"results": results, "llm": llm.STATS, "embed": embed.STATS,
                                                            "wall_s": time.time() - t0}), encoding="utf-8")
     threading.Thread(target=report_progress, daemon=True).start()
     with ThreadPoolExecutor(max_workers=len(names)) as ex:

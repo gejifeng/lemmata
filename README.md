@@ -197,6 +197,10 @@ python3 -m lemmata.campaign --set easy --hours 6 --run my_run
 # continue hard problems, reusing skeletons from earlier runs (lemma cache and best attempts are reused automatically)
 python3 -m lemmata.campaign --set main --hours 12 --run my_run2 --resume-from my_run
 
+# optionally enable local/OpenAI `/v1/embeddings` augmentation (experience memory + semantic rerank + name grounding)
+python3 -m lemmata.campaign my_theorem.lean --hours 1 --embedding
+python3 -m lemmata.campaign my_theorem.lean --hours 1 --embedding --emb-features experience,search,names
+
 # re-verify all solved PutnamBench problems from scratch and collect them into results/proofs/
 python3 -m lemmata.report all
 
@@ -223,6 +227,7 @@ re-read on every use, so it can be edited while a campaign runs. The main knobs:
 | `fair_share_calls` | 3 | priority drops by 1 for every N model calls a problem has used |
 | `resume_previous` / `lemma_cache` | true / true | reuse attempts and lemmas from earlier runs |
 | `save_trajectories` | true | persist full prompt `messages` and `<think>` `reasoning` traces (`llm_calls.jsonl`, `attempts.jsonl`, `skeletons.jsonl`) for SFT/DPO/RL export via `python3 -m lemmata.dataset` |
+| `embedding` / `embedding_url` | false / `http://127.0.0.1:8090/v1/embeddings` | optional pluggable `/v1/embeddings` module (`emb_experience`, `emb_search`, `emb_names`, `emb_repair`); degrades gracefully when unreachable |
 
 Environment variables (set them in `.env` or in the shell):
 
@@ -256,6 +261,7 @@ lemmata/
   llm.py         streaming client (DeepSeek / vLLM / OpenAI styles), priority scheduling, thinking-budget salvage
   search.py      LeanSearch / Loogle retrieval checked against the local Mathlib
   names.py       real-name suggestions for unknown identifiers
+  embed.py       optional SQLite-cached `/v1/embeddings` experience memory & semantic reranking
   autopatch.py   deterministic repairs (automation combo + exact?, dead-tactic removal)
   harvest.py     turn `sorry` gaps into lemmas via `extract_goal`
   history.py     best earlier attempt per statement

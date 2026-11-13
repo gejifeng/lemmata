@@ -125,25 +125,32 @@ def localize(rows: list[dict], source: str) -> list[Premise]:
     return out
 
 
-def search(queries: list[str], k: int = 6, limit: int = 15) -> list[Premise]:
+def search(queries: list[str], k: int = 6, limit: int = 15, context: str = "") -> list[Premise]:
     """Natural-language queries go to LeanSearch; queries that look like Loogle patterns (contain a dotted
-    constant name, `_`/`?` metavariables or `⊢`) go to Loogle. Results are de-duplicated and interleaved."""
+    constant name, `_`/`?` metavariables or `⊢`) go to Loogle. Results are de-duplicated and interleaved
+    (or semantically reranked when `emb_search` is enabled)."""
+    from . import embed
+    use_emb = embed.emb_enabled("search")
+    fetch_k = max(k, 8) if use_emb else k
+    clean_qs = [q.strip() for q in queries if q.strip()]
     per_query: list[list[Premise]] = []
-    for q in queries:
-        q = q.strip()
-        if not q:
-            continue
-        if is_loogle_query(q):
-            per_query.append(localize(loogle(q, k), "loogle"))
-        else:
-            per_query.append(localize(leansearch(q, k), "leansearch"))
+    for q in clean_qs:
+        raw_lst = localize(loogle(q, fetch_k), "loogle") if is_loogle_query(q) else localize(leansearch(q, fetch_k), "leansearch")
+        if use_emb and len(raw_lst) > 1:
+            q_ctx = f"Search query: {q}\nTarget theorem:\n{context.strip()}" if context.strip() else q
+            raw_lst = embed.rerank_premises(q_ctx, raw_lst, limit=fetch_k, include_local_pool=False)
+        per_query.append(raw_lst)
     seen: set[str] = set()
     merged: list[Premise] = []
-    for rank in range(k):
+    for rank in range(fetch_k):
         for lst in per_query:
             if rank < len(lst) and lst[rank].name not in seen:
                 seen.add(lst[rank].name)
                 merged.append(lst[rank])
+    if use_emb and len(merged) < limit:
+        eff_ctx = context.strip() or "\n".join(clean_qs)
+        if eff_ctx:
+            return embed.rerank_premises(eff_ctx, merged, limit=limit, include_local_pool=True)
     return merged[:limit]
 
 
@@ -189,13 +196,13 @@ def propose_queries(statement: str, extra: str = "", priority: int = 0) -> list[
 SEARCH_BLOCK = re.compile(r"```search\s*\n(.*?)```", re.S)
 
 
-def run_search_blocks(text: str) -> str:
+def run_search_blocks(text: str, context: str = "") -> str:
     """Execute ```search blocks written by the model; return rendered results ('' if none)."""
     queries = []
     for blk in SEARCH_BLOCK.findall(text):
         queries += [l.strip() for l in blk.splitlines() if l.strip()]
     if not queries:
         return ""
-    prems = search(queries[:6], k=6, limit=18)
+    prems = search(queries[:6], k=6, limit=18, context=context)
     return render_premises(prems, "Results of your ```search queries (verified to exist in this Mathlib):") or \
         "Your ```search queries returned nothing usable."

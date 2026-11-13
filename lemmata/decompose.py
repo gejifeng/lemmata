@@ -203,7 +203,8 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
                   priority: int = 0, premises: str = "", plan: str = "",
                   ancestors: frozenset[str] = frozenset(), depth: int = 0) -> Skeleton | None:
     from .agent import runtime_config
-    save_traj = bool(runtime_config().get("save_trajectories", True))
+    cfg = runtime_config()
+    save_traj = bool(cfg.get("save_trajectories", True))
     extra = ""
     if problem.context:
         extra += ("\nAll declarations shown above the target theorem are ALREADY available in the file; "
@@ -213,6 +214,15 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
         extra += f"\nAn informal proof worked out earlier (use it if it is sound):\n{plan[-4000:]}\n"
     if premises:
         extra += f"\n{premises}\n"
+    try:
+        from . import embed
+        if embed.emb_enabled("experience", cfg):
+            sk_refs = embed.retrieve_skeletons(problem, k=1, min_score=0.65, exclude_name=problem.name)
+            if sk_refs:
+                extra += ("\nA validated decomposition skeleton from a related earlier theorem (structural reference only):\n"
+                          f"```lean\n{sk_refs[0]['clean_block']}\n```\n")
+    except Exception:
+        pass
     messages = [
         {"role": "system", "content": SKETCH_SYSTEM},
         {"role": "user", "content": SKETCH_PROMPT.format(header=problem.header, display=problem.display(),
@@ -235,6 +245,7 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
         sk = prepare_skeleton(problem, resp.content)
         fb = ("Output one ```lean block with the defs, helper lemmas (proved by sorry) and the full main theorem."
               if sk is None else validate_skeleton(problem, sk, ancestors))
+        cblock = candidate_block(problem, sk.candidate) if sk is not None else ""
         with (out_dir / "skeletons.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "round": rnd,
@@ -243,12 +254,18 @@ def make_skeleton(problem: Problem, out_dir: Path, failures: str, rounds: int = 
                 "reasoning": (getattr(resp, "reasoning", "") if save_traj else ""),
                 "reasoning_tokens": int(getattr(resp, "reasoning_tokens", 0) or 0),
                 "content": resp.content,
-                "clean_block": (candidate_block(problem, sk.candidate) if sk is not None else ""),
+                "clean_block": cblock,
                 "tokens": resp.completion_tokens,
                 "seconds": round(resp.seconds, 3),
                 "messages": msg_snap,
             }, ensure_ascii=False) + "\n")
-        if fb is None:
+        if fb is None and sk is not None:
+            try:
+                from . import embed
+                embed.record_valid_skeleton(problem, cblock, [n for n, _ in sk.lemmas],
+                                            source=str(out_dir / "skeletons.jsonl"))
+            except Exception:
+                pass
             return sk
         messages.append({"role": "assistant", "content": resp.content[-8000:]})
         messages.append({"role": "user", "content": fb + "\n\nFix the skeleton and output it again in full."})
@@ -358,20 +375,35 @@ def cache_lookup(problem: Problem) -> Candidate | None:
     try:
         lines = LEMMA_CACHE.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return None
+        lines = []
     for line in reversed(lines):
         row = json.loads(line)
         if row["key"] == key:
             cand = Candidate(row["helpers"], row["body"], {})
             if check(problem, cand).solved:
                 return cand
+    try:
+        from . import embed
+        if embed.emb_enabled("experience") and not problem.solution_defs:
+            for it in embed.retrieve_lemmas(problem, k=2, min_score=0.86, max_block_chars=4000):
+                cand = Candidate(it.get("helpers", ""), it.get("body", ""), {})
+                if cand.body.strip() and check(problem, cand).solved:
+                    embed.STATS["lemma_transfers"] += 1
+                    return cand
+    except Exception:
+        pass
     return None
 
 
 def cache_store(problem: Problem, cand: Candidate) -> None:
     with _cache_lock, LEMMA_CACHE.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"key": _cache_key(problem), "name": problem.name, "helpers": cand.helpers,
-                             "body": cand.body}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps({"key": _cache_key(problem), "name": problem.name, "statement": problem.statement,
+                             "helpers": cand.helpers, "body": cand.body}, ensure_ascii=False) + "\n")
+    try:
+        from . import embed
+        embed.record_solved_lemma(problem, cand, source=str(LEMMA_CACHE))
+    except Exception:
+        pass
 
 
 def _fresh_ns(idx: int, *texts: str) -> str:
